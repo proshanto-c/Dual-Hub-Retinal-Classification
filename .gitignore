@@ -22,6 +22,7 @@
 !tune_all.py
 !evaluate_all.py
 !tune_hyperparams.py
+!train_multilabel_img_only.py
 !submit_tuning.sh
 !submit_evaluation.sh
 !submit_hparam_tuning.sh

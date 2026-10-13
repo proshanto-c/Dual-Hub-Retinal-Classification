@@ -161,7 +161,7 @@ class PatientGraphModel(nn.Module):
                 })
             
             # --- DYNAMIC LABEL PATHWAYS ---
-            if self.prediction_level in ["patient", "dual_hub"]:
+            if self.prediction_level in ["patient", "dual_hub"] and self.use_context:
                 conv_dict[("patient", "to", "label")] = GATConv((-1, -1), hidden_dim, heads=heads, concat=False, dropout=dropout, add_self_loops=False, edge_dim=1)
                 conv_dict[("label", "to", "patient")] = GATConv((-1, -1), hidden_dim, heads=heads, concat=False, dropout=dropout, add_self_loops=False, edge_dim=1)
             
@@ -281,7 +281,6 @@ class PatientGraphModel(nn.Module):
                         # Extract the global CLS token and inject it into the Image Node!
                         # cls_token = features[:, 0, :]
                         # x_dict["image"] = x_dict["image"] + self.cls_encoder(cls_token)
-                        
                         patch_features_seq = features[:, 1:, :] 
                     else:
                         patch_features_seq = features
@@ -290,11 +289,16 @@ class PatientGraphModel(nn.Module):
                     patch_features = patch_features_seq.reshape(-1, c)
                 else:
                     b, c, h, w = features.shape
+                    # global_pooled = features.mean(dim=(-2, -1))
+                    # x_dict["image"] = x_dict["image"] + self.cls_encoder(global_pooled)
                     patch_features = features.permute(0, 2, 3, 1).reshape(-1, c)
                     
             elif self.backbone == "resnet":
                 features = self.cnn.forward_features(imgs)
                 b, c, h, w = features.shape
+                # Global Average Pooling (GAP) commented out to restore fast training
+                # global_pooled = features.mean(dim=(-2, -1))
+                # x_dict["image"] = x_dict["image"] + self.cls_encoder(global_pooled)
                 patch_features = features.permute(0, 2, 3, 1).reshape(-1, c)
                 
             x_dict["patch"] = self.patch_encoder(patch_features) + self.type_bias["patch"]
