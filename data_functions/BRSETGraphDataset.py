@@ -388,16 +388,16 @@ class BRSETGraphDataset(Dataset):
         data[("patch", "adjacent", "patch")].edge_attr = self.base_patch_adj_attr.repeat(num_images, 1)
         
         data[("patch", "to", "image")].edge_index = torch.stack([torch.cat(p2i_src), torch.cat(p2i_dst)], dim=0)
-        data[("patch", "to", "image")].edge_attr = torch.rand((data[("patch", "to", "image")].edge_index.size(1), 1), dtype=torch.float32)
+        data[("patch", "to", "image")].edge_attr = torch.ones((data[("patch", "to", "image")].edge_index.size(1), 1), dtype=torch.float32)
         
         data[("image", "to", "patch")].edge_index = torch.stack([torch.cat(i2p_src), torch.cat(i2p_dst)], dim=0)
-        data[("image", "to", "patch")].edge_attr = torch.rand((data[("image", "to", "patch")].edge_index.size(1), 1), dtype=torch.float32)
+        data[("image", "to", "patch")].edge_attr = torch.ones((data[("image", "to", "patch")].edge_index.size(1), 1), dtype=torch.float32)
         
         data[("image", "to", "patient")].edge_index = torch.stack([torch.cat(i2pat_src), torch.cat(i2pat_dst)], dim=0)
-        data[("image", "to", "patient")].edge_attr = torch.rand((data[("image", "to", "patient")].edge_index.size(1), 1), dtype=torch.float32)
+        data[("image", "to", "patient")].edge_attr = torch.ones((data[("image", "to", "patient")].edge_index.size(1), 1), dtype=torch.float32)
         
         data[("patient", "to", "image")].edge_index = torch.stack([torch.cat(pat2i_src), torch.cat(pat2i_dst)], dim=0)
-        data[("patient", "to", "image")].edge_attr = torch.rand((data[("patient", "to", "image")].edge_index.size(1), 1), dtype=torch.float32)
+        data[("patient", "to", "image")].edge_attr = torch.ones((data[("patient", "to", "image")].edge_index.size(1), 1), dtype=torch.float32)
             
     def _attach_structural_edges(self, data: HeteroData, num_labels: int, num_images: int) -> None:
         num_demo = len(self.demo_specs)
@@ -419,10 +419,10 @@ class BRSETGraphDataset(Dataset):
             data[("demographic", "correlates", "demographic")].edge_attr = torch.empty((0, 1), dtype=torch.float32)
         
         data[("demographic", "to", "patient")].edge_index = torch.tensor([list(range(num_demo)), [0] * num_demo], dtype=torch.long)
-        data[("demographic", "to", "patient")].edge_attr = torch.rand((num_demo, 1), dtype=torch.float32)
+        data[("demographic", "to", "patient")].edge_attr = torch.ones((num_demo, 1), dtype=torch.float32)
         
         data[("patient", "to", "demographic")].edge_index = torch.tensor([[0] * num_demo, list(range(num_demo))], dtype=torch.long)
-        data[("patient", "to", "demographic")].edge_attr = torch.rand((num_demo, 1), dtype=torch.float32)
+        data[("patient", "to", "demographic")].edge_attr = torch.ones((num_demo, 1), dtype=torch.float32)
         
         corr_src, corr_dst, corr_attr = [], [], []
         for i in range(num_labels):
@@ -437,10 +437,10 @@ class BRSETGraphDataset(Dataset):
         
         if self.prediction_level in ["patient", "dual_hub"]:
             data[("patient", "to", "label")].edge_index = torch.tensor([[0] * num_labels, list(range(num_labels))], dtype=torch.long)
-            data[("patient", "to", "label")].edge_attr = torch.rand((num_labels, 1), dtype=torch.float32)
+            data[("patient", "to", "label")].edge_attr = torch.ones((num_labels, 1), dtype=torch.float32)
             
             data[("label", "to", "patient")].edge_index = torch.tensor([list(range(num_labels)), [0] * num_labels], dtype=torch.long)
-            data[("label", "to", "patient")].edge_attr = torch.rand((num_labels, 1), dtype=torch.float32)
+            data[("label", "to", "patient")].edge_attr = torch.ones((num_labels, 1), dtype=torch.float32)
             
         if self.prediction_level in ["image", "dual_hub"]:
             img_src, lbl_dst = [], []
@@ -449,26 +449,26 @@ class BRSETGraphDataset(Dataset):
                 lbl_dst.extend(list(range(num_labels)))
                 
             data[("image", "to", "label")].edge_index = torch.tensor([img_src, lbl_dst], dtype=torch.long)
-            data[("image", "to", "label")].edge_attr = torch.rand((len(img_src), 1), dtype=torch.float32)
+            data[("image", "to", "label")].edge_attr = torch.ones((len(img_src), 1), dtype=torch.float32)
             
             data[("label", "to", "image")].edge_index = torch.tensor([lbl_dst, img_src], dtype=torch.long)
-            data[("label", "to", "image")].edge_attr = torch.rand((len(lbl_dst), 1), dtype=torch.float32)
+            data[("label", "to", "image")].edge_attr = torch.ones((len(lbl_dst), 1), dtype=torch.float32)
             
         if self.prediction_level == "central_hub":
             # Image <-> Central
             data[("image", "to", "central")].edge_index = torch.tensor([list(range(num_images)), [0] * num_images], dtype=torch.long)
-            data[("image", "to", "central")].edge_attr = torch.rand((num_images, 1), dtype=torch.float32)
+            data[("image", "to", "central")].edge_attr = torch.ones((num_images, 1), dtype=torch.float32)
             data[("central", "to", "image")].edge_index = torch.tensor([[0] * num_images, list(range(num_images))], dtype=torch.long)
-            data[("central", "to", "image")].edge_attr = torch.rand((num_images, 1), dtype=torch.float32)
+            data[("central", "to", "image")].edge_attr = torch.ones((num_images, 1), dtype=torch.float32)
             
             # Patient <-> Central
             data[("patient", "to", "central")].edge_index = torch.tensor([[0], [0]], dtype=torch.long)
-            data[("patient", "to", "central")].edge_attr = torch.rand((1, 1), dtype=torch.float32)
+            data[("patient", "to", "central")].edge_attr = torch.ones((1, 1), dtype=torch.float32)
             data[("central", "to", "patient")].edge_index = torch.tensor([[0], [0]], dtype=torch.long)
-            data[("central", "to", "patient")].edge_attr = torch.rand((1, 1), dtype=torch.float32)
+            data[("central", "to", "patient")].edge_attr = torch.ones((1, 1), dtype=torch.float32)
             
             # Label <-> Central
             data[("label", "to", "central")].edge_index = torch.tensor([list(range(num_labels)), [0] * num_labels], dtype=torch.long)
-            data[("label", "to", "central")].edge_attr = torch.rand((num_labels, 1), dtype=torch.float32)
+            data[("label", "to", "central")].edge_attr = torch.ones((num_labels, 1), dtype=torch.float32)
             data[("central", "to", "label")].edge_index = torch.tensor([[0] * num_labels, list(range(num_labels))], dtype=torch.long)
-            data[("central", "to", "label")].edge_attr = torch.rand((num_labels, 1), dtype=torch.float32)
+            data[("central", "to", "label")].edge_attr = torch.ones((num_labels, 1), dtype=torch.float32)
