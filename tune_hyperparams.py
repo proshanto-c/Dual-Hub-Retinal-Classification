@@ -39,10 +39,39 @@ except ImportError:
 # 1. METADATA & HYPERPARAMETER SEARCH SPACE
 # =====================================================================
 
-ALL_LABELS = [
+ALL_MULTILABEL_LABELS = [
     "increased_cup_disc", "drusens", "diabetic_retinopathy", "macular_edema",
     "scar", "amd", "myopic_fundus"
 ]
+SINGLELABEL_DR_LABELS = ["diabetic_retinopathy"]
+SINGLELABEL_MF_LABELS = ["myopic_fundus"]
+
+LABEL_ALIASES = {
+    "dr": "diabetic_retinopathy",
+    "diabetic_retinopathy": "diabetic_retinopathy",
+    "mf": "myopic_fundus",
+    "myopic_fundus": "myopic_fundus",
+    "myopia": "myopic_fundus",
+    "icd": "increased_cup_disc",
+    "glaucoma": "increased_cup_disc",
+    "increased_cup_disc": "increased_cup_disc",
+    "drusen": "drusens",
+    "drusens": "drusens",
+    "me": "macular_edema",
+    "macular_edema": "macular_edema",
+    "scar": "scar",
+    "amd": "amd",
+}
+
+LABEL_SHORT_NAMES = {
+    "diabetic_retinopathy": "DR",
+    "myopic_fundus": "MF",
+    "increased_cup_disc": "ICD",
+    "drusens": "Drusens",
+    "macular_edema": "ME",
+    "scar": "Scar",
+    "amd": "AMD",
+}
 
 GRID_SEARCH_SPACE = {
     "hidden_dim": [128, 256, 512],
@@ -56,7 +85,7 @@ GRID_SEARCH_SPACE = {
 
 def parse_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Hyperparameter tuning for the Multilabel Image-Only PatientGraphModel."
+        description="Hyperparameter tuning for Image-Only PatientGraphModel (Singlelabel DR, MF, or Multilabel)."
     )
     p.add_argument("--root", type=Path, required=True, help="Dataset root directory.")
     p.add_argument("--prepared-dir", type=Path, default=None, help="Directory containing train.csv/val.csv.")
@@ -73,6 +102,50 @@ def parse_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--learning-rate", type=float, default=1e-4, help="Base GNN learning rate (default: 1e-4).")
     p.add_argument("--cnn-learning-rate", type=float, default=1e-5, help="CNN backbone learning rate when split (default: 1e-5).")
+
+    # Target task / label toggles
+    p.add_argument(
+        "--target",
+        type=str,
+        default=None,
+        help="Target to tune: 'dr' (middle prevalence, default), 'mf' (low prevalence), 'multilabel', or any specific condition name.",
+    )
+    p.add_argument(
+        "--mode",
+        type=str,
+        default=None,
+        help="Target mode: 'singlelabel_dr', 'singlelabel_mf', 'multilabel'.",
+    )
+    p.add_argument(
+        "--singlelabel-dr",
+        action="store_true",
+        help="Convenience toggle: train singlelabel Diabetic Retinopathy models (middle prevalence, default).",
+    )
+    p.add_argument(
+        "--singlelabel-mf", "--singlelabel-myopic-fundus",
+        action="store_true",
+        dest="singlelabel_mf",
+        help="Convenience toggle: train singlelabel Myopic Fundus models (low prevalence).",
+    )
+    p.add_argument(
+        "--multilabel",
+        action="store_true",
+        help="Convenience toggle: train multilabel models across all 7 conditions.",
+    )
+    p.add_argument(
+        "--singlelabel",
+        type=str,
+        default=None,
+        metavar="LABEL_NAME",
+        help="Train a single-label model for any specified condition (e.g. dr, mf, amd, scar).",
+    )
+    p.add_argument(
+        "--labels",
+        nargs="+",
+        default=None,
+        help="Explicit list of target label(s) for tuning (overrides other toggles).",
+    )
+
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--device", choices=["auto", "cuda", "cpu"], default="auto")
     p.add_argument("--deterministic", action="store_true")
@@ -97,11 +170,11 @@ def parse_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--split-index", type=int, default=0, help="0-indexed chunk to run.")
 
     # W&B Arguments
-    p.add_argument("--wandb-project", type=str, default="Hyperparam-Tuning-Multilabel-ImgOnly")
+    p.add_argument("--wandb-project", type=str, default=None)
     p.add_argument("--wandb-entity", type=str, default=None)
-    p.add_argument("--wandb-run-name-prefix", type=str, default="hparam")
-    p.add_argument("--wandb-group", type=str, default="Multilabel-ImgOnly-Tuning")
-    p.add_argument("--wandb-tags", nargs="*", default=["hparam_tuning", "multilabel_img_only"])
+    p.add_argument("--wandb-run-name-prefix", type=str, default=None)
+    p.add_argument("--wandb-group", type=str, default=None)
+    p.add_argument("--wandb-tags", nargs="*", default=None)
     p.add_argument("--wandb-mode", type=str, default="online", choices=["online", "offline", "disabled"])
 
     return p.parse_args(args)
@@ -156,7 +229,79 @@ def main() -> None:
 
     root = args.root.expanduser().resolve()
     prepared_dir = args.prepared_dir.expanduser().resolve() if args.prepared_dir else (root / "prepared")
-    output_dir = args.output_dir.expanduser().resolve() if args.output_dir else (root / "runs" / "hparam_tuning_multilabel_img_only")
+
+    # Resolve target selection
+    raw_target = None
+    if args.singlelabel_mf:
+        raw_target = "myopic_fundus"
+    elif args.singlelabel_dr:
+        raw_target = "diabetic_retinopathy"
+    elif args.multilabel:
+        raw_target = "multilabel"
+    elif args.singlelabel:
+        raw_target = args.singlelabel
+    elif args.target:
+        raw_target = args.target
+    elif args.mode:
+        raw_target = args.mode
+
+    if args.labels:
+        label_columns = [LABEL_ALIASES.get(lbl.lower(), lbl) for lbl in args.labels]
+        is_multilabel = len(label_columns) > 1
+        if is_multilabel:
+            target_mode = "multilabel"
+            short_name = "Multilabel"
+        else:
+            canonical_name = label_columns[0]
+            short_name = LABEL_SHORT_NAMES.get(canonical_name, canonical_name.replace("_", " ").title())
+            tag_code = LABEL_SHORT_NAMES.get(canonical_name, canonical_name.split("_")[0]).lower()
+            target_mode = f"singlelabel_{tag_code}"
+    elif raw_target is not None:
+        raw_lower = raw_target.lower().strip()
+        if raw_lower in ["multi", "multilabel", "all"]:
+            label_columns = ALL_MULTILABEL_LABELS
+            is_multilabel = True
+            target_mode = "multilabel"
+            short_name = "Multilabel"
+        else:
+            cleaned = raw_lower.replace("singlelabel_", "")
+            canonical_name = LABEL_ALIASES.get(cleaned, cleaned)
+            label_columns = [canonical_name]
+            is_multilabel = False
+            short_name = LABEL_SHORT_NAMES.get(canonical_name, canonical_name.replace("_", " ").title())
+            tag_code = LABEL_SHORT_NAMES.get(canonical_name, canonical_name.split("_")[0]).lower()
+            target_mode = f"singlelabel_{tag_code}"
+    else:
+        # Default: single-label Diabetic Retinopathy
+        canonical_name = "diabetic_retinopathy"
+        label_columns = [canonical_name]
+        is_multilabel = False
+        short_name = "DR"
+        target_mode = "singlelabel_dr"
+
+    # Configure defaults based on mode
+    if is_multilabel:
+        default_project = "Hyperparam-Tuning-Multilabel-ImgOnly"
+        default_group = "Multilabel-ImgOnly-Tuning"
+        default_prefix = "hparam_multi"
+        default_tags = ["hparam_tuning", "multilabel", "image_only"]
+        default_out_dir_name = "hparam_tuning_multilabel_img_only"
+        experiment_type = "multilabel_img_only"
+    else:
+        tag_code = LABEL_SHORT_NAMES.get(label_columns[0], label_columns[0].split("_")[0]).lower()
+        default_project = f"Hyperparam-Tuning-Singlelabel-{short_name}"
+        default_group = f"Singlelabel-{short_name}-Image-Only"
+        default_prefix = f"hparam_{tag_code}"
+        default_tags = ["hparam_tuning", f"singlelabel_{tag_code}", label_columns[0], "image_only"]
+        default_out_dir_name = f"hparam_tuning_singlelabel_{tag_code}"
+        experiment_type = f"singlelabel_{tag_code}_img_only"
+
+    wandb_project = args.wandb_project or default_project
+    wandb_group = args.wandb_group or default_group
+    wandb_prefix = args.wandb_run_name_prefix or default_prefix
+    wandb_tags = args.wandb_tags if args.wandb_tags is not None else default_tags
+
+    output_dir = args.output_dir.expanduser().resolve() if args.output_dir else (root / "runs" / default_out_dir_name)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     set_seed(args.seed, args.deterministic)
@@ -164,7 +309,8 @@ def main() -> None:
     amp_enabled = not args.no_amp and device.type == "cuda"
     
     print("===================================================================")
-    print(" HYPERPARAMETER TUNING: Multilabel Image-Only Model")
+    print(f" HYPERPARAMETER TUNING: {short_name.upper()} Image-Only Model")
+    print(f" Target Mode: {target_mode} | Labels ({len(label_columns)}): {label_columns}")
     print("===================================================================")
     print(f"Device: {device} | AMP: {amp_enabled} | Backbone: {args.backbone}")
     print(f"Dataset root: {root}")
@@ -179,7 +325,7 @@ def main() -> None:
     val_frame, _ = preprocess_comorbidities(val_frame, valid_comorb=top_comorb)
 
     # Infer demographic columns & specs
-    demo_columns = infer_demographic_columns(train_frame, None, ALL_LABELS)
+    demo_columns = infer_demographic_columns(train_frame, None, label_columns)
     demo_specs = fit_demographic_specs(train_frame, demo_columns)
 
     # Image Transforms
@@ -201,10 +347,10 @@ def main() -> None:
         transforms.Normalize(mean=mean, std=std),
     ])
 
-    # Multilabel Image-Only Dataset kwargs
+    # Singlelabel DR Image-Only Dataset kwargs
     dataset_kwargs = {
         "image_dir": root / "fundus_photos_512",
-        "target_cols": ALL_LABELS,
+        "target_cols": label_columns,
         "demo_cols": demo_columns,
         "demo_specs": demo_specs,
         "image_size": args.image_size,
@@ -233,6 +379,16 @@ def main() -> None:
     pos_counts = np.maximum(train_targets.sum(axis=0), 1.0)
     neg_counts = np.maximum(train_targets.shape[0] - pos_counts, 1.0)
     adaptive_biases = np.log(pos_counts / neg_counts).astype(np.float32)
+
+    print("-------------------------------------------------------------------")
+    print(f" Dataset Target Statistics (Total Samples: {len(train_dataset.samples)}):")
+    for idx, lbl in enumerate(label_columns):
+        p_count = int(pos_counts[idx])
+        pct = (p_count / len(train_dataset.samples)) * 100.0
+        w = float(pos_weight[idx].item())
+        bias = float(adaptive_biases[idx])
+        print(f"   • [{lbl}] Positive: {p_count}/{len(train_dataset.samples)} ({pct:.2f}%) | Pos Weight: {w:.2f} | Prior Logit Bias: {bias:.2f}")
+    print("-------------------------------------------------------------------\n")
 
     # Generate trials
     all_trials = generate_trial_configs(args)
@@ -290,7 +446,7 @@ def main() -> None:
         )
 
         model = PatientGraphModel(
-            num_labels=len(ALL_LABELS),
+            num_labels=len(label_columns),
             demographic_specs=demo_specs,
             hidden_dim=h_dim,
             num_layers=n_layers,
@@ -337,8 +493,9 @@ def main() -> None:
         scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_epochs)
 
         trial_config = {
-            "experiment": "multilabel_img_only",
-            "labels": ALL_LABELS,
+            "experiment": experiment_type,
+            "mode": target_mode,
+            "labels": label_columns,
             "no_context": True,
             "no_image": False,
             "trial_idx": trial_idx,
@@ -364,15 +521,15 @@ def main() -> None:
         }
         write_json(run_dir / "run_config.json", trial_config)
 
-        run_name = f"{args.wandb_run_name_prefix}-{trial_name}"
+        run_name = f"{wandb_prefix}-{trial_name}"
         wandb_run = start_wandb_run(
-            project=args.wandb_project,
+            project=wandb_project,
             run_name=run_name,
             config=trial_config,
             output_dir=run_dir,
             entity=args.wandb_entity,
-            group=args.wandb_group,
-            tags=args.wandb_tags,
+            group=wandb_group,
+            tags=wandb_tags,
             mode=args.wandb_mode
         )
 
@@ -387,7 +544,7 @@ def main() -> None:
         for epoch in range(1, args.epochs + 1):
             train_res = graph_epoch(
                 model=model, loader=train_loader, criterion=criterion, device=device,
-                amp_enabled=amp_enabled, label_columns=ALL_LABELS, optimizer=optimizer,
+                amp_enabled=amp_enabled, label_columns=label_columns, optimizer=optimizer,
                 scaler=scaler, desc=f"[{trial_name}] E{epoch:02d} Train", threshold=args.threshold,
                 accum_steps=accum_steps
             )
@@ -395,14 +552,14 @@ def main() -> None:
 
             val_res = graph_epoch(
                 model=model, loader=val_loader, criterion=criterion, device=device,
-                amp_enabled=amp_enabled, label_columns=ALL_LABELS, optimizer=None,
+                amp_enabled=amp_enabled, label_columns=label_columns, optimizer=None,
                 scaler=None, desc=f"[{trial_name}] E{epoch:02d} Val", threshold=args.threshold
             )
 
             best_thresholds, epoch_threshold_df = find_optimal_thresholds(
                 targets=val_res["targets"],
                 probabilities=val_res["probabilities"],
-                label_names=ALL_LABELS,
+                label_names=label_columns,
                 step=0.05
             )
             epoch_calibrated_f1 = epoch_threshold_df["validation_f1"].mean()
@@ -484,7 +641,7 @@ def main() -> None:
 
                 uncalibrated_preds = (y_prob >= 0.5).astype(int)
                 calibrated_preds = (y_prob >= best_thresholds.reshape(1, -1)).astype(int)
-                for idx, label in enumerate(ALL_LABELS):
+                for idx, label in enumerate(label_columns):
                     prefix = f"{idx+1:02d}_"
                     try:
                         auroc = roc_auc_score(y_true[:, idx], y_prob[:, idx])
@@ -517,14 +674,14 @@ def main() -> None:
 
         final_val_res = graph_epoch(
             model=model, loader=val_loader, criterion=criterion, device=device,
-            amp_enabled=amp_enabled, label_columns=ALL_LABELS, optimizer=None,
+            amp_enabled=amp_enabled, label_columns=label_columns, optimizer=None,
             scaler=None, desc=f"[{trial_name}] Final Best Val Eval", threshold=args.threshold
         )
 
         best_thresholds, final_threshold_df = find_optimal_thresholds(
             targets=final_val_res["targets"],
             probabilities=final_val_res["probabilities"],
-            label_names=ALL_LABELS,
+            label_names=label_columns,
             step=0.05
         )
 
@@ -551,7 +708,7 @@ def main() -> None:
 
         y_true = final_val_res["targets"]
         y_prob = final_val_res["probabilities"]
-        for idx, label in enumerate(ALL_LABELS):
+        for idx, label in enumerate(label_columns):
             prefix = f"{idx+1:02d}_"
             try:
                 auroc = float(roc_auc_score(y_true[:, idx], y_prob[:, idx]))
@@ -597,7 +754,7 @@ def main() -> None:
             wandb_run.summary["best_val/macro_accuracy_calibrated"] = final_eval_summary["final_val_accuracy_calibrated"]
             wandb_run.summary["best_val/macro_balanced_acc_calibrated"] = final_eval_summary["final_val_balanced_acc_calibrated"]
 
-            for idx, label in enumerate(ALL_LABELS):
+            for idx, label in enumerate(label_columns):
                 prefix = f"{idx+1:02d}_"
                 c_stats = final_eval_summary["per_class"][label]
                 wandb_run.summary[f"best_val_per_class/auprc_{prefix}{label}"] = c_stats["auprc"]

@@ -442,8 +442,12 @@ class BRSETGraphDataset(Dataset):
                     corr_dst.append(j)
                     corr_attr.append([self.label_corr_matrix[i, j].item()])
                     
-        data[("label", "correlates", "label")].edge_index = torch.tensor([corr_src, corr_dst], dtype=torch.long)
-        data[("label", "correlates", "label")].edge_attr = torch.tensor(corr_attr, dtype=torch.float32)
+        if len(corr_src) > 0:
+            data[("label", "correlates", "label")].edge_index = torch.tensor([corr_src, corr_dst], dtype=torch.long)
+            data[("label", "correlates", "label")].edge_attr = torch.tensor(corr_attr, dtype=torch.float32)
+        else:
+            data[("label", "correlates", "label")].edge_index = torch.empty((2, 0), dtype=torch.long)
+            data[("label", "correlates", "label")].edge_attr = torch.empty((0, 1), dtype=torch.float32)
         
         if self.prediction_level in ["patient", "dual_hub"]:
             data[("patient", "to", "label")].edge_index = torch.tensor([[0] * num_labels, list(range(num_labels))], dtype=torch.long)
