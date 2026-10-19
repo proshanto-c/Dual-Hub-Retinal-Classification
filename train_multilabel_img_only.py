@@ -69,7 +69,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--backbone", type=str, choices=["retfound", "resnet"], default="resnet")
     p.add_argument("--image-size", type=int, default=512)
     p.add_argument("--patch-size", type=int, default=None, help="Defaults to 32 for resnet, 16 for retfound")
-    p.add_argument("--connectivity", default=8, help="Patch graph connectivity (fc, 4, or 8, defaults to 8)")
+    p.add_argument("--connectivity", default="fc", help="Patch graph connectivity: 'fc' (dense SDPA with Gaussian bias, recommended), 4, or 8 (defaults to fc)")
     
     # Model Architecture (Matched to tune_all defaults)
     p.add_argument("--hidden-dim", type=int, default=256)
@@ -123,8 +123,6 @@ def main() -> None:
     # Adaptive micro-batching and gradient accumulation to prevent CUDA OOM
     if args.micro_batch_size is not None:
         micro_bs = args.micro_batch_size
-    elif str(args.connectivity).lower() in ("fc", "fully_connected", "all", "0") and args.hidden_dim >= 256:
-        micro_bs = max(1, args.batch_size // 2)
     elif args.hidden_dim >= 512:
         micro_bs = max(1, args.batch_size // 2)
     else:
@@ -225,7 +223,10 @@ def main() -> None:
         initial_biases=adaptive_biases,
         use_context=False,          # Image-Only model baseline
         use_image_features=True,    # Image features enabled
-        backbone=args.backbone
+        backbone=args.backbone,
+        patch_connectivity=args.connectivity,
+        image_size=args.image_size,
+        patch_size=args.patch_size,
     ).to(device)
 
     if os.name != 'nt':

@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as models
 from dataclasses import dataclass
-from typing import Dict, Optional, Sequence
+from typing import Any, Dict, Optional, Sequence
 
 try:
     from torch_geometric.data import HeteroData
@@ -19,6 +19,81 @@ class DemographicSpec:
     mean: float = 0.0
     std: float = 1.0
     vocab: Optional[Dict[str, int]] = None
+
+
+class DensePatchAttention(nn.Module):
+    """
+    Dense Multi-Head Self-Attention over image patches using PyTorch scaled_dot_product_attention (SDPA).
+    Incorporates 2D Gaussian spatial distance matrix as an additive attention bias.
+    Executes via FlashAttention / cuDNN tensor cores per image (N=256) instead of irregular sparse GAT message passing,
+    providing massive speedups and completely avoiding PyG graph edge explosion.
+    """
+    def __init__(
+        self,
+        hidden_dim: int,
+        heads: int = 2,
+        dropout: float = 0.1,
+        grid_h: int = 16,
+        grid_w: int = 16,
+    ):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.heads = heads
+        self.head_dim = hidden_dim // heads if hidden_dim % heads == 0 else hidden_dim
+        self.inner_dim = self.head_dim * heads
+        self.dropout = dropout
+        self.n_patches = grid_h * grid_w
+        
+        self.q_proj = nn.Linear(hidden_dim, self.inner_dim, bias=False)
+        self.k_proj = nn.Linear(hidden_dim, self.inner_dim, bias=False)
+        self.v_proj = nn.Linear(hidden_dim, self.inner_dim, bias=False)
+        self.out_proj = nn.Linear(self.inner_dim, hidden_dim)
+        self.norm = nn.LayerNorm(hidden_dim)
+        
+        # Precompute static 2D Gaussian distance matrix: [1, 1, N, N]
+        coords_y = torch.arange(grid_h).repeat_interleave(grid_w)
+        coords_x = torch.arange(grid_w).repeat(grid_h)
+        dist_sq = (coords_y.unsqueeze(1) - coords_y.unsqueeze(0))**2 + (coords_x.unsqueeze(1) - coords_x.unsqueeze(0))**2
+        sigma_sq = (grid_w / 2.0)**2
+        gaussian_bias = torch.exp(-dist_sq.float() / sigma_sq).unsqueeze(0).unsqueeze(0)
+        self.register_buffer("gaussian_bias", gaussian_bias)
+        
+        # Learnable per-head spatial bias scale (initialized to 1.0)
+        self.bias_scale = nn.Parameter(torch.ones(1, heads, 1, 1))
+
+    def forward(self, patch_x: torch.Tensor, num_images: int) -> torch.Tensor:
+        """
+        patch_x: [num_images * n_patches, hidden_dim]
+        num_images: number of images in the batch
+        Returns updated patch_x: [num_images * n_patches, hidden_dim]
+        """
+        b = num_images
+        n = self.n_patches
+        d = self.hidden_dim
+        
+        x_dense = patch_x.view(b, n, d)
+        
+        # Multi-head projections: [B, heads, N, head_dim]
+        q = self.q_proj(x_dense).view(b, n, self.heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x_dense).view(b, n, self.heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(x_dense).view(b, n, self.heads, self.head_dim).transpose(1, 2)
+        
+        # Additive Gaussian spatial bias
+        attn_mask = (self.bias_scale * self.gaussian_bias).to(dtype=q.dtype)
+        
+        # FlashAttention / cuDNN accelerated SDPA
+        drop_p = self.dropout if self.training else 0.0
+        attn_out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=drop_p)
+        
+        # Reshape and project back: [B, N, D]
+        attn_out = attn_out.transpose(1, 2).reshape(b, n, self.inner_dim)
+        attn_out = self.out_proj(attn_out)
+        attn_out = F.dropout(attn_out, p=drop_p, training=self.training)
+        
+        # Residual connection + LayerNorm
+        x_dense = self.norm(x_dense + attn_out)
+        
+        return x_dense.view(-1, d)
 
 
 class PatientGraphModel(nn.Module):
@@ -37,6 +112,9 @@ class PatientGraphModel(nn.Module):
         use_context: bool = True,
         use_image_features: bool = True,
         backbone: str = "retfound",
+        patch_connectivity: Any = "fc",
+        image_size: int = 512,
+        patch_size: Optional[int] = None,
     ) -> None:
         super().__init__()
         
@@ -52,6 +130,28 @@ class PatientGraphModel(nn.Module):
         self.demographic_specs = list(demographic_specs)
         self.dropout = dropout
         self.max_images_per_patient = max_images_per_patient
+        
+        self.patch_connectivity = str(patch_connectivity).lower()
+        self.image_size = image_size
+        self.patch_size = (16 if backbone == "retfound" else 32) if patch_size is None else patch_size
+        self.grid_h = self.image_size // self.patch_size
+        self.grid_w = self.image_size // self.patch_size
+        self.n_patches = self.grid_h * self.grid_w
+        
+        self.use_sdpa_patch = self.use_image_features and (self.patch_connectivity in ("fc", "sdpa", "dense", "transformer"))
+        
+        if self.use_sdpa_patch:
+            self.patch_attns = nn.ModuleList([
+                DensePatchAttention(
+                    hidden_dim=hidden_dim,
+                    heads=heads,
+                    dropout=dropout,
+                    grid_h=self.grid_h,
+                    grid_w=self.grid_w,
+                ) for _ in range(num_layers)
+            ])
+        else:
+            self.patch_attns = None
 
         # --- Load Pre-trained Vision Backbone ---
         try:
@@ -144,8 +244,9 @@ class PatientGraphModel(nn.Module):
                 ("label", "correlates", "label"): GATConv((-1, -1), hidden_dim, heads=heads, concat=False, dropout=dropout, add_self_loops=True, edge_dim=1),
             }
             if self.use_image_features:
+                if not self.use_sdpa_patch:
+                    conv_dict[("patch", "adjacent", "patch")] = GATConv((-1, -1), hidden_dim, heads=heads, concat=False, dropout=dropout, add_self_loops=True, edge_dim=1)
                 conv_dict.update({
-                    ("patch", "adjacent", "patch"): GATConv((-1, -1), hidden_dim, heads=heads, concat=False, dropout=dropout, add_self_loops=True, edge_dim=1),
                     ("patch", "to", "image"): GATConv((-1, -1), hidden_dim, heads=heads, concat=False, dropout=dropout, add_self_loops=False, edge_dim=1),
                     ("image", "to", "patch"): GATConv((-1, -1), hidden_dim, heads=heads, concat=False, dropout=dropout, add_self_loops=False, edge_dim=1),
                 })
@@ -303,8 +404,13 @@ class PatientGraphModel(nn.Module):
                 
             x_dict["patch"] = self.patch_encoder(patch_features) + self.type_bias["patch"]
 
-        for conv, norm in zip(self.convs, self.norms):
-            # Pass edge_attr_dict so GATConv receives the explicit edge features!
+        for layer_idx, (conv, norm) in enumerate(zip(self.convs, self.norms)):
+            # 1. Intra-image dense patch self-attention (FlashAttention SDPA with Gaussian spatial bias)
+            if self.use_image_features and self.patch_attns is not None:
+                num_images = data["image"].num_nodes
+                x_dict["patch"] = self.patch_attns[layer_idx](x_dict["patch"], num_images=num_images)
+
+            # 2. Heterogeneous bipartite message passing (patch <-> image, image <-> label, etc.)
             out_dict = conv(x_dict, data.edge_index_dict, data.edge_attr_dict)
             next_x = {}
             for node_type, x in x_dict.items():

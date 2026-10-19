@@ -62,8 +62,12 @@ def create_dataloader(
         
     if is_graph:
         kwargs["pin_memory"] = True
-        kwargs["persistent_workers"] = True
-        kwargs["prefetch_factor"] = 3
+        if num_workers > 0:
+            kwargs["persistent_workers"] = True
+            kwargs["prefetch_factor"] = prefetch_factor if prefetch_factor is not None else 3
+        else:
+            kwargs["persistent_workers"] = False
+            kwargs["prefetch_factor"] = None
 
         from torch_geometric.loader import DataLoader as PyGDataLoader
         return PyGDataLoader(**kwargs)

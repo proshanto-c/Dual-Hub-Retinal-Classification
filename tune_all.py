@@ -258,7 +258,10 @@ def main() -> None:
                 prediction_level="dual_hub", initial_biases=adaptive_biases,
                 use_context=not exp["no_context"],
                 use_image_features=not exp.get("no_image", False),
-                backbone=args.backbone
+                backbone=args.backbone,
+                patch_connectivity=args.connectivity,
+                image_size=args.image_size,
+                patch_size=args.patch_size,
             ).to(device)
             
             # Massive speedup for modern GPUs (20-30% faster matrix operations)

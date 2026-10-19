@@ -127,7 +127,10 @@ def evaluate_model(config_dir, args, device, test_transform, test_frame, checkpo
         prediction_level="dual_hub",
         use_context=not no_context,
         use_image_features=not no_image,
-        backbone=backbone
+        backbone=backbone,
+        patch_connectivity=connectivity,
+        image_size=args.image_size,
+        patch_size=patch_size,
     ).to(device)
     
     # Strip '_orig_mod.' prefix if checkpoint was saved from a compiled model

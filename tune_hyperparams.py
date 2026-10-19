@@ -46,9 +46,8 @@ ALL_LABELS = [
 
 GRID_SEARCH_SPACE = {
     "hidden_dim": [128, 256, 512],
-    "num_layers": [2, 3, 4],
-    "heads": [2, 3, 4],
-    "dropout": [0.25]
+    "dropout": [0.15, 0.25, 0.35],
+    "lr_strategy": ["uniform", "split"],
 }
 
 # =====================================================================
@@ -69,10 +68,11 @@ def parse_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--backbone", type=str, choices=["retfound", "resnet"], default="resnet")
     p.add_argument("--image-size", type=int, default=512)
     p.add_argument("--patch-size", type=int, default=None, help="Defaults to 16 for retfound, 32 for resnet")
-    p.add_argument("--connectivity", default="fc", help="Patch graph connectivity (fc, 4, or 8)")
+    p.add_argument("--connectivity", default="fc", help="Patch graph connectivity: 'fc' (dense SDPA with Gaussian bias, recommended), 4, or 8 (defaults to fc)")
     p.add_argument("--epochs", type=int, default=150)
     p.add_argument("--batch-size", type=int, default=32)
-    p.add_argument("--learning-rate", type=float, default=1e-4)
+    p.add_argument("--learning-rate", type=float, default=1e-4, help="Base GNN learning rate (default: 1e-4).")
+    p.add_argument("--cnn-learning-rate", type=float, default=1e-5, help="CNN backbone learning rate when split (default: 1e-5).")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--device", choices=["auto", "cuda", "cpu"], default="auto")
     p.add_argument("--deterministic", action="store_true")
@@ -81,14 +81,15 @@ def parse_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--num-workers", type=int, default=8)
 
     # Search strategy controls
-    p.add_argument("--grid-search", action="store_true", help="Run full grid search over the search space.")
+    p.add_argument("--grid-search", action="store_true", help="Run full grid search over the search space (18 trials).")
     p.add_argument("--num-trials", type=int, default=5, help="Number of random hyperparameter trials (ignored if --grid-search is set).")
     
     # Specific hyperparameter overrides (for single trial or W&B sweeps)
-    p.add_argument("--hidden-dim", type=int, choices=[128, 256, 512], default=None)
-    p.add_argument("--num-layers", type=int, choices=[2, 3, 4], default=None)
-    p.add_argument("--heads", type=int, choices=[2, 3, 4], default=None)
-    p.add_argument("--dropout", type=float, default=0.25, help="Dropout probability (fixed at 0.25 by default).")
+    p.add_argument("--hidden-dim", type=int, choices=[128, 256, 512], default=None, help="Hidden dim (128, 256, 512).")
+    p.add_argument("--dropout", type=float, choices=[0.15, 0.25, 0.35], default=None, help="Dropout probability (.15, .25, .35).")
+    p.add_argument("--lr-strategy", type=str, choices=["uniform", "split"], default=None, help="'uniform' (1e-4 all) or 'split' (1e-4 gnn, 1e-5 cnn).")
+    p.add_argument("--num-layers", type=int, default=3, help="Number of GNN layers (fixed to 3 for this sweep).")
+    p.add_argument("--heads", type=int, default=2, help="Number of attention heads (default: 2).")
 
     # Splitting Arguments for SLURM Job Arrays
     p.add_argument("--split-total", type=int, default=1, help="Total number of parallel jobs.")
@@ -112,18 +113,24 @@ def parse_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
 def generate_trial_configs(args: argparse.Namespace) -> List[Dict[str, Any]]:
     """Generates the list of hyperparameter dictionary combinations to run."""
     # Check if single explicit hyperparameter set was provided via CLI
-    if all(v is not None for v in [args.hidden_dim, args.num_layers, args.heads]):
+    if all(v is not None for v in [args.hidden_dim, args.dropout, args.lr_strategy]):
         return [{
             "hidden_dim": args.hidden_dim,
+            "dropout": args.dropout,
+            "lr_strategy": args.lr_strategy,
             "num_layers": args.num_layers,
             "heads": args.heads,
-            "dropout": args.dropout
         }]
     
-    # Generate all 81 combinations in the grid
+    # Generate all 18 combinations in the grid (hidden_dim x dropout x lr_strategy)
     keys = list(GRID_SEARCH_SPACE.keys())
     values = list(GRID_SEARCH_SPACE.values())
-    all_combinations = [dict(zip(keys, v)) for v in product(*values)]
+    all_combinations = []
+    for v in product(*values):
+        combo = dict(zip(keys, v))
+        combo["num_layers"] = args.num_layers
+        combo["heads"] = args.heads
+        all_combinations.append(combo)
     
     if args.grid_search:
         return all_combinations
@@ -245,9 +252,10 @@ def main() -> None:
             torch.cuda.empty_cache()
 
         h_dim = hparams["hidden_dim"]
-        n_layers = hparams["num_layers"]
-        heads = hparams["heads"]
         dropout = hparams["dropout"]
+        lr_strategy = hparams.get("lr_strategy", "uniform")
+        n_layers = hparams.get("num_layers", args.num_layers)
+        heads = hparams.get("heads", args.heads)
         
         # Adaptive micro-batching for large models to prevent CUDA OOM
         if h_dim >= 512:
@@ -257,10 +265,11 @@ def main() -> None:
             micro_batch_size = args.batch_size
             accum_steps = 1
 
-        trial_name = f"trial_{trial_idx:02d}_h{h_dim}_l{n_layers}_head{heads}_drop{dropout}"
+        trial_name = f"trial_{trial_idx:02d}_h{h_dim}_drop{dropout}_{lr_strategy}_lr"
         print("===================================================================")
         print(f"=== [TRIAL {trial_idx}/{total_trials}] {trial_name.upper()} ===")
-        print(f"=== Params: h_dim={h_dim}, n_layers={n_layers}, heads={heads}, dropout={dropout} ===")
+        print(f"=== Params: h_dim={h_dim}, dropout={dropout}, lr_strategy={lr_strategy} ===")
+        print(f"=== Fixed: num_layers={n_layers}, heads={heads} ===")
         print(f"=== Micro-batch: {micro_batch_size}, Grad Accumulation: {accum_steps} ===")
         print("===================================================================\n")
 
@@ -290,7 +299,10 @@ def main() -> None:
             initial_biases=adaptive_biases,
             use_context=False,          # Image-Only model baseline
             use_image_features=True,    # Image features enabled
-            backbone=args.backbone
+            backbone=args.backbone,
+            patch_connectivity=args.connectivity,
+            image_size=args.image_size,
+            patch_size=args.patch_size,
         ).to(device)
 
         if os.name != 'nt':
@@ -302,7 +314,24 @@ def main() -> None:
             print("Skipping torch.compile on Windows (Triton unsupported).")
 
         criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-        optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
+
+        gnn_lr = args.learning_rate
+        cnn_lr = args.cnn_learning_rate
+
+        if lr_strategy == "split" and any(p.requires_grad for p in model.cnn.parameters()):
+            cnn_params = [p for p in model.cnn.parameters() if p.requires_grad]
+            cnn_param_ids = set(id(p) for p in cnn_params)
+            gnn_params = [p for p in model.parameters() if p.requires_grad and id(p) not in cnn_param_ids]
+            optimizer = torch.optim.AdamW([
+                {"params": gnn_params, "lr": gnn_lr, "name": "gnn"},
+                {"params": cnn_params, "lr": cnn_lr, "name": "cnn"},
+            ])
+            print(f"=== Optimizer: SPLIT LR (GNN={gnn_lr}, CNN Backbone={cnn_lr}) ===")
+        else:
+            trainable_params = [p for p in model.parameters() if p.requires_grad]
+            optimizer = torch.optim.AdamW(trainable_params, lr=gnn_lr)
+            print(f"=== Optimizer: UNIFORM LR (All trainable={gnn_lr}) ===")
+
         scaler = make_grad_scaler(amp_enabled)
         
         warmup_epochs = max(1, int(0.1 * args.epochs))
@@ -314,14 +343,17 @@ def main() -> None:
             "no_context": True,
             "no_image": False,
             "trial_idx": trial_idx,
+            "trial_name": trial_name,
             "hidden_dim": h_dim,
             "num_layers": n_layers,
             "heads": heads,
             "dropout": dropout,
+            "lr_strategy": lr_strategy,
+            "learning_rate": gnn_lr,
+            "cnn_learning_rate": cnn_lr if lr_strategy == "split" else gnn_lr,
             "batch_size": args.batch_size,
             "micro_batch_size": micro_batch_size,
             "accum_steps": accum_steps,
-            "lr": args.learning_rate,
             "seed": args.seed,
             "demo_cols": demo_columns,
             "demo_specs": [ds.__dict__ for ds in demo_specs],
@@ -432,9 +464,12 @@ def main() -> None:
                 y_true = val_res["targets"]
                 y_prob = val_res["probabilities"]
 
+                lrs = scheduler.get_last_lr()
                 log_dict = {
                     "epoch": epoch,
-                    "lr": scheduler.get_last_lr()[0],
+                    "lr": lrs[0],
+                    "lr/gnn": lrs[0],
+                    "lr/cnn": lrs[1] if len(lrs) > 1 else lrs[0],
                     "train/loss": train_res["loss"],
                     "val/loss": val_res["loss"],
                     "val/macro_f1_uncalibrated": val_res["summary"]["macro_f1"],

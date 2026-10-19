@@ -140,16 +140,24 @@ class BRSETGraphDataset(Dataset):
         self.n_patches = self.grid_h * self.grid_w
         
         # 1. Cache Spatial Adjacency
-        adj = grid_edge_index(self.grid_h, self.grid_w, self.connectivity, device=torch.device('cpu'))
-        self.base_patch_adj_src = adj[0]
-        self.base_patch_adj_dst = adj[1]
-        
-        # Calculate Gaussian distance weight for patch adjacency
-        src_y, src_x = self.base_patch_adj_src // self.grid_w, self.base_patch_adj_src % self.grid_w
-        dst_y, dst_x = self.base_patch_adj_dst // self.grid_w, self.base_patch_adj_dst % self.grid_w
-        dist_sq = (src_y - dst_y)**2 + (src_x - dst_x)**2
-        sigma_sq = (self.grid_w / 2.0)**2  # Gaussian spread heuristic
-        self.base_patch_adj_attr = torch.exp(-dist_sq / sigma_sq).unsqueeze(-1).to(torch.float32)
+        conn_str = str(self.connectivity).lower()
+        if conn_str in ("fc", "sdpa", "dense", "none", "transformer"):
+            # Dense SDPA handles patch-to-patch attention via PyTorch FlashAttention;
+            # no sparse graph edges needed in PyG.
+            self.base_patch_adj_src = None
+            self.base_patch_adj_dst = None
+            self.base_patch_adj_attr = None
+        else:
+            adj = grid_edge_index(self.grid_h, self.grid_w, self.connectivity, device=torch.device('cpu'))
+            self.base_patch_adj_src = adj[0]
+            self.base_patch_adj_dst = adj[1]
+            
+            # Calculate Gaussian distance weight for patch adjacency
+            src_y, src_x = self.base_patch_adj_src // self.grid_w, self.base_patch_adj_src % self.grid_w
+            dst_y, dst_x = self.base_patch_adj_dst // self.grid_w, self.base_patch_adj_dst % self.grid_w
+            dist_sq = (src_y - dst_y)**2 + (src_x - dst_x)**2
+            sigma_sq = (self.grid_w / 2.0)**2  # Gaussian spread heuristic
+            self.base_patch_adj_attr = torch.exp(-dist_sq / sigma_sq).unsqueeze(-1).to(torch.float32)
         
         # 2. Cache Hierarchical Adjacency
         self.base_patch_to_img_src = torch.arange(self.n_patches, dtype=torch.long)
@@ -368,8 +376,9 @@ class BRSETGraphDataset(Dataset):
         for img_idx in range(num_images):
             patch_offset = img_idx * self.n_patches
             
-            p_adj_src.append(self.base_patch_adj_src + patch_offset)
-            p_adj_dst.append(self.base_patch_adj_dst + patch_offset)
+            if self.base_patch_adj_src is not None:
+                p_adj_src.append(self.base_patch_adj_src + patch_offset)
+                p_adj_dst.append(self.base_patch_adj_dst + patch_offset)
             
             shifted_p2i_src = self.base_patch_to_img_src + patch_offset
             shifted_p2i_dst = self.base_patch_to_img_dst + img_idx
@@ -384,8 +393,9 @@ class BRSETGraphDataset(Dataset):
             pat2i_src.append(torch.tensor([0], dtype=torch.long))
             pat2i_dst.append(torch.tensor([img_idx], dtype=torch.long))
             
-        data[("patch", "adjacent", "patch")].edge_index = torch.stack([torch.cat(p_adj_src), torch.cat(p_adj_dst)], dim=0)
-        data[("patch", "adjacent", "patch")].edge_attr = self.base_patch_adj_attr.repeat(num_images, 1)
+        if self.base_patch_adj_src is not None and len(p_adj_src) > 0:
+            data[("patch", "adjacent", "patch")].edge_index = torch.stack([torch.cat(p_adj_src), torch.cat(p_adj_dst)], dim=0)
+            data[("patch", "adjacent", "patch")].edge_attr = self.base_patch_adj_attr.repeat(num_images, 1)
         
         data[("patch", "to", "image")].edge_index = torch.stack([torch.cat(p2i_src), torch.cat(p2i_dst)], dim=0)
         data[("patch", "to", "image")].edge_attr = torch.ones((data[("patch", "to", "image")].edge_index.size(1), 1), dtype=torch.float32)
