@@ -574,6 +574,16 @@ def main() -> None:
                 "optimal_threshold": opt_thresh
             }
 
+        print("\n" + "=" * 65)
+        print(f" TRIAL {trial_idx}/{total_trials} COMPLETED: {trial_name.upper()}")
+        print(f" Best Checkpoint (by AUPRC) from Epoch {final_eval_summary['best_epoch']}:")
+        print(f"   • Validation Macro AUPRC:         {final_eval_summary['final_val_macro_auprc']:.4f}")
+        print(f"   • Validation Macro AUROC:         {final_eval_summary['final_val_macro_auroc']:.4f}")
+        print(f"   • Validation Calibrated Macro F1: {final_eval_summary['final_val_macro_f1_calibrated']:.4f}")
+        print(f"   • Validation Calibrated Micro F1: {final_eval_summary['final_val_micro_f1_calibrated']:.4f}")
+        print(f"   • Validation Loss:                 {final_eval_summary['final_val_loss']:.4f}")
+        print("=" * 65 + "\n")
+
         write_json(run_dir / "best_val_eval_results.json", final_eval_summary)
 
         if wandb_run is not None:

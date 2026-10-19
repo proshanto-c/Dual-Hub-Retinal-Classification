@@ -6,7 +6,7 @@
 #SBATCH --gres=gpu:1                # Request 1 GPU
 #SBATCH --time=47:59:00             # Max time limit
 #SBATCH --job-name=hparam_grid
-#SBATCH --array=0-8                 # Array tasks 0-8 run splits 0..8 (2 trials per worker = 18 total)
+#SBATCH --array=1-8                 # Array tasks 0-8 run splits 0..8 (2 trials per worker = 18 total)
 #SBATCH --output=logs/hparam_%A_%a.out
 #SBATCH --error=logs/hparam_%A_%a.err
 
