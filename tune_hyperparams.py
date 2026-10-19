@@ -79,6 +79,7 @@ def parse_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--no-amp", action="store_true")
     p.add_argument("--threshold", type=float, default=0.5)
     p.add_argument("--num-workers", type=int, default=8)
+    p.add_argument("--compile", action="store_true", help="Compile model with torch.compile (disabled by default due to PyG HeteroConv recompilations).")
 
     # Search strategy controls
     p.add_argument("--grid-search", action="store_true", help="Run full grid search over the search space (18 trials).")
@@ -305,13 +306,11 @@ def main() -> None:
             patch_size=args.patch_size,
         ).to(device)
 
-        if os.name != 'nt':
+        if getattr(args, "compile", False) and os.name != 'nt':
             try:
                 model = torch.compile(model)
             except Exception as e:
                 print(f"Skipping torch.compile: {e}")
-        else:
-            print("Skipping torch.compile on Windows (Triton unsupported).")
 
         criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
@@ -430,7 +429,8 @@ def main() -> None:
             current_val_loss = val_res["loss"]
 
             raw_model = getattr(model, "_orig_mod", model)
-            if args.backbone == "retfound":
+            cnn_has_trainable = hasattr(raw_model, "cnn") and any(p.requires_grad for p in raw_model.cnn.parameters())
+            if args.backbone == "retfound" and not cnn_has_trainable:
                 state_dict_to_save = {k: v for k, v in raw_model.state_dict().items() if not k.startswith("cnn.")}
             else:
                 state_dict_to_save = raw_model.state_dict()

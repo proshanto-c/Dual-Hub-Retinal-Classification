@@ -87,6 +87,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--threshold", type=float, default=0.5)
     p.add_argument("--monitor", choices=["val_loss", "val_macro_f1"], default="val_loss")
     p.add_argument("--num-workers", type=int, default=8)
+    p.add_argument("--compile", action="store_true", help="Compile model with torch.compile (disabled by default due to PyG HeteroConv recompilations).")
     p.add_argument("--num-trials", type=int, default=1, help="Number of random search trials per model config.")
 
     # Splitting Arguments
@@ -264,15 +265,11 @@ def main() -> None:
                 patch_size=args.patch_size,
             ).to(device)
             
-            # Massive speedup for modern GPUs (20-30% faster matrix operations)
-            # Only enable on Linux/SLURM (Triton compiler doesn't support native Windows)
-            if os.name != 'nt':
+            if getattr(args, "compile", False) and os.name != 'nt':
                 try:
                     model = torch.compile(model)
                 except Exception as e:
                     print(f"Skipping torch.compile: {e}")
-            else:
-                print("Skipping torch.compile on Windows (Triton unsupported).")
 
             # Removed weight=class_weights to prevent massive double-weighted gradient spikes from rare labels!
             criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
