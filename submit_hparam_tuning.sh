@@ -6,7 +6,7 @@
 #SBATCH --gres=gpu:1                # Request 1 GPU
 #SBATCH --time=47:59:00             # Max time limit
 #SBATCH --job-name=hparam_dr
-#SBATCH --array=1-8                 # Array tasks 0-8 run splits 0..8 (2 trials per worker = 18 total)
+#SBATCH --array=3-8                 # Array tasks 0-8 run splits 0..8 (2 trials per worker = 18 total)
 #SBATCH --output=logs/hparam_%A_%a.out
 #SBATCH --error=logs/hparam_%A_%a.err
 
@@ -24,7 +24,7 @@ mkdir -p logs
 #   sbatch submit_hparam_tuning.sh 42 mf            # Myopic Fundus (low prevalence)
 #   sbatch submit_hparam_tuning.sh 42 multilabel    # Multi-label (all 7 conditions)
 SEED=${1:-42}
-TARGET=${2:-dr}                      # Options: 'dr' (default), 'mf', 'multilabel', or any disease name
+TARGET=${2:-mf}                      # Options: 'dr' (default), 'mf', 'multilabel', or any disease name
 SPLIT_TOTAL=9                        # 18 total trials / 9 splits = 2 trials per job
 
 TARGET_LOWER=$(echo "$TARGET" | tr '[:upper:]' '[:lower:]')
@@ -36,7 +36,7 @@ case "$TARGET_LOWER" in
         TARGET_FLAG="--target dr"
         ;;
     mf|myopic_fundus|singlelabel_mf|singlelabel_myopic_fundus|myopia)
-        PROJECT="HParam-Tuning-Singlelabel-MF"
+        PROJECT="Hyperparam-Tuning-Singlelabel-MF"
         OUTPUT_DIR="/users/sann7128/ca-mlc-refactor/data/BRSET/runs/hparam_mf_${SEED}"
         TARGET_FLAG="--target mf"
         ;;
