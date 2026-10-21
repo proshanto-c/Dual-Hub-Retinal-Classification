@@ -338,9 +338,19 @@ def main() -> None:
     total_planned = len(all_runs)
 
     # Slice for parallel array jobs
-    start_idx = total_planned * args.split_index // args.split_total
-    end_idx = total_planned * (args.split_index + 1) // args.split_total
-    my_runs = all_runs[start_idx:end_idx]
+    if total_planned <= args.split_total:
+        if args.split_index < total_planned:
+            my_runs = [all_runs[args.split_index]]
+            start_idx = args.split_index
+            end_idx = args.split_index + 1
+        else:
+            my_runs = []
+            start_idx = total_planned
+            end_idx = total_planned
+    else:
+        start_idx = total_planned * args.split_index // args.split_total
+        end_idx = total_planned * (args.split_index + 1) // args.split_total
+        my_runs = all_runs[start_idx:end_idx]
 
     print("===================================================================")
     print(" FINAL SWEEP: HEAD-TO-HEAD COMPARISON ON 5 REMAINING SINGLE LABELS")
@@ -350,7 +360,10 @@ def main() -> None:
     print(f"Output root directory: {output_dir}")
     print(f"W&B Unified Project: {args.wandb_project}")
     print(f"Total planned runs: {total_planned} | Mode/Part: {args.part}")
-    print(f"Worker Split {args.split_index + 1}/{args.split_total} - Processing runs {start_idx + 1} to {end_idx} ({len(my_runs)} runs).\n")
+    if len(my_runs) > 0:
+        print(f"Worker Split {args.split_index + 1}/{args.split_total} - Processing runs {start_idx + 1} to {end_idx} ({len(my_runs)} runs).\n")
+    else:
+        print(f"Worker Split {args.split_index + 1}/{args.split_total} - No runs allocated (0 runs).\n")
 
     if len(my_runs) == 0:
         print("No runs allocated for this worker split. Exiting.")

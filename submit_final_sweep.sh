@@ -33,21 +33,24 @@ PART_LOWER=$(echo "$PART" | tr '[:upper:]' '[:lower:]')
 case "$PART_LOWER" in
     1|part1)
         PART_ARG="--part 1"
-        SPLIT_TOTAL=5                # 5 labels in Part 1 -> 1 label per job
+        DEFAULT_SPLITS=5                # 5 labels in Part 1 -> 1 label per job
         ;;
     2|part2)
         PART_ARG="--part 2"
-        SPLIT_TOTAL=5                # 5 labels in Part 2 -> 1 label per job
+        DEFAULT_SPLITS=5                # 5 labels in Part 2 -> 1 label per job
         ;;
     all|both)
         PART_ARG="--part all"
-        SPLIT_TOTAL=10               # 10 runs in total (5 labels x 2 candidates)
+        DEFAULT_SPLITS=10               # 10 runs in total (5 labels x 2 candidates)
         ;;
     *)
         PART_ARG="--part $PART_LOWER"
-        SPLIT_TOTAL=5
+        DEFAULT_SPLITS=5
         ;;
 esac
+
+# If running within a SLURM job array, prioritize SLURM_ARRAY_TASK_COUNT
+SPLIT_TOTAL=${SLURM_ARRAY_TASK_COUNT:-$DEFAULT_SPLITS}
 
 # 4. Run Sweep Runner
 python sweep_remaining_singlelabels.py \
