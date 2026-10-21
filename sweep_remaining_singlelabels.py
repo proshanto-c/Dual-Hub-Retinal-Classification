@@ -443,10 +443,9 @@ def main() -> None:
                 "demo_specs": demo_specs,
                 "image_size": args.image_size,
                 "patch_size": args.patch_size,
-                "use_context": False,          # Strictly Image-Only
-                "use_image_features": True,
+                "connectivity": args.connectivity,
                 "prediction_level": "dual_hub",
-                "patch_connectivity": args.connectivity,
+                "train_frame": train_frame,
             }
 
             train_dataset = BRSETGraphDataset(
