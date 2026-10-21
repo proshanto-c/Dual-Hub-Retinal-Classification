@@ -26,6 +26,8 @@
 !submit_tuning.sh
 !submit_evaluation.sh
 !submit_hparam_tuning.sh
+!sweep_remaining_singlelabels.py
+!submit_final_sweep.sh
 
 !models/
 !models/**
