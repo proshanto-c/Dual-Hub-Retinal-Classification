@@ -100,6 +100,7 @@ class BRSETGraphDataset(Dataset):
         train_frame: Optional[pd.DataFrame] = None,
         label_corr_matrix: Optional[torch.Tensor] = None,
         demo_corr_matrix: Optional[torch.Tensor] = None,
+        load_images: bool = True,
     ) -> None:
         
         if prediction_level not in ["patient", "image", "dual_hub", "central_hub"]:
@@ -119,6 +120,7 @@ class BRSETGraphDataset(Dataset):
         self.train_frame = train_frame
         self.preset_label_corr = label_corr_matrix
         self.preset_demo_corr = demo_corr_matrix
+        self.load_images = load_images
         
         self.image_size = image_size
         self.patch_size = patch_size
@@ -345,19 +347,19 @@ class BRSETGraphDataset(Dataset):
         )
         
         # --- RESNET INTEGRATION: LOAD RAW IMAGES ---
-        image_tensors = []
-        for path in sample["image_paths"]:
-            with Image.open(path) as img:
-                img = img.convert("RGB")
-                if self.transform:
-                    img = self.transform(img) # MUST include Resize((256, 256))
-                if not isinstance(img, torch.Tensor):
-                    img = transforms.ToTensor()(img)
-            image_tensors.append(img)
-            
-        # Store the stacked images in the graph object!
-        # PyG will automatically batch these into [Batch_Size_Images, 3, 256, 256]
-        data["image"].raw_images = torch.stack(image_tensors, dim=0)
+        if self.load_images:
+            image_tensors = []
+            for path in sample["image_paths"]:
+                with Image.open(path) as img:
+                    img = img.convert("RGB")
+                    if self.transform:
+                        img = self.transform(img) # MUST include Resize((256, 256))
+                    if not isinstance(img, torch.Tensor):
+                        img = transforms.ToTensor()(img)
+                image_tensors.append(img)
+            data["image"].raw_images = torch.stack(image_tensors, dim=0)
+        else:
+            data["image"].raw_images = torch.empty((num_images, 3, 1, 1), dtype=torch.float32)
         
         # --- RESNET INTEGRATION: SETUP EMPTY PATCH NODES ---
         # We need 64 patches per image. We create an empty tensor so PyG doesn't crash 
