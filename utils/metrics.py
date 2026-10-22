@@ -69,84 +69,72 @@ def find_optimal_thresholds(
     targets: np.ndarray, 
     probabilities: np.ndarray, 
     label_names: Sequence[str], 
-    step: float = 0.01
+    step: float = 0.001
 ) -> Tuple[np.ndarray, pd.DataFrame]:
     """
-    Sweeps through probability thresholds to find the one that maximizes F1 score per label.
-    Uses percentiles of the predicted probabilities to dynamically adapt to highly skewed distributions.
+    Sweeps through probability thresholds to find the threshold that maximizes F1 score per label.
+    For single-label, this directly maximizes F1.
+    For multilabel, independently maximizing F1 per label maximizes macro-F1.
+    Uses candidate thresholds in exact steps of `step` (default: 0.001) plus distribution percentiles.
     """
     best_thresholds = []
     rows = []
 
-    # Calculate percentiles to sweep based on the step size
-    percentiles = np.linspace(1, 99, int(1.0 / step))
+    # Grid candidates in exact requested increments (e.g. 0.001 -> 999 thresholds)
+    candidates = np.round(np.arange(step, 1.0, step, dtype=np.float32), decimals=4)
 
     for index, label in enumerate(label_names):
         y_true = targets[:, index]
         y_score = probabilities[:, index]
         
-        # Dynamically generate candidates based on the actual probability distribution for this label
-        candidates = np.percentile(y_score, percentiles)
-        candidates = np.unique(np.clip(candidates, 0.001, 0.999))
+        # Vectorized confusion matrix calculation across all candidate thresholds
+        preds = y_score[:, None] >= candidates[None, :]
+        y_bool = (y_true > 0)[:, None]
         
-        is_multilabel = len(label_names) > 1
+        tp = np.logical_and(y_bool, preds).sum(axis=0)
+        fp = np.logical_and(~y_bool, preds).sum(axis=0)
+        fn = np.logical_and(y_bool, ~preds).sum(axis=0)
+        tn = np.logical_and(~y_bool, ~preds).sum(axis=0)
         
-        best_f1_threshold = 0.5
-        best_f1_val = -1.0
+        # F1 optimization (maximizes F1 for single-label, maximizes macro-F1 for multilabel)
+        denom = 2 * tp + fp + fn
+        f1_scores = np.where(denom > 0, (2.0 * tp) / denom, 0.0)
         
-        best_youden_threshold = 0.5
-        best_youden_val = -1.0
+        best_f1_idx = int(np.argmax(f1_scores))
+        best_f1_threshold = float(candidates[best_f1_idx])
+        best_f1_val = float(f1_scores[best_f1_idx])
         
-        for threshold in candidates:
-            prediction = (y_score >= threshold).astype(np.int8)
-            
-            # 1. Track F1 Optimization
-            f1 = safe_metric(f1_score, y_true, prediction, zero_division=0, default=0.0)
-            if f1 > best_f1_val:
-                best_f1_val = f1
-                best_f1_threshold = float(threshold)
+        # Optimal threshold selection strictly by F1
+        best_primary_threshold = best_f1_threshold
                 
-            # 2. Track Youden Optimization (if multilabel)
-            if is_multilabel:
-                try:
-                    tn, fp, fn, tp = confusion_matrix(y_true, prediction, labels=[0, 1]).ravel()
-                    sens = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-                    spec = tn / (tn + fp) if (tn + fp) > 0 else 0.0
-                    j_stat = sens + spec - 1.0
-                except Exception:
-                    j_stat = -1.0
-                    
-                if j_stat > best_youden_val:
-                    best_youden_val = j_stat
-                    best_youden_threshold = float(threshold)
-                    
-        # The "primary" optimal threshold is Youden for multilabel, F1 for single-label
-        best_primary_threshold = best_youden_threshold if is_multilabel else best_f1_threshold
-                
-        # --- Calculate Accuracy metrics using the primary winning threshold ---
+        # Calculate full metrics using the optimal winning threshold
         primary_prediction = (y_score >= best_primary_threshold).astype(np.int8)
-        primary_acc = safe_metric(accuracy_score, y_true, primary_prediction, default=0.0)
-        primary_bal_acc = safe_metric(balanced_accuracy_score, y_true, primary_prediction, default=0.0)
-        primary_f1_final = safe_metric(f1_score, y_true, primary_prediction, zero_division=0, default=0.0)
+        has_both = np.unique(y_true).size > 1
         
-        # Calculate F1 using the Youden threshold explicitly
-        if is_multilabel:
-            youden_prediction = (y_score >= best_youden_threshold).astype(np.int8)
-            youden_f1 = safe_metric(f1_score, y_true, youden_prediction, zero_division=0, default=0.0)
-        else:
-            youden_f1 = math.nan
-                
+        primary_acc = safe_metric(accuracy_score, y_true, primary_prediction, default=0.0)
+        primary_bal_acc = safe_metric(balanced_accuracy_score, y_true, primary_prediction, default=0.0) if has_both else math.nan
+        primary_f1_final = safe_metric(f1_score, y_true, primary_prediction, zero_division=0, default=0.0)
+        primary_prec = safe_metric(precision_score, y_true, primary_prediction, zero_division=0, default=0.0)
+        primary_rec = safe_metric(recall_score, y_true, primary_prediction, zero_division=0, default=0.0)
+        primary_auroc = safe_metric(roc_auc_score, y_true, y_score, default=0.0) if has_both else math.nan
+        primary_auprc = safe_metric(average_precision_score, y_true, y_score, default=0.0) if y_true.sum() > 0 else math.nan
+        
         best_thresholds.append(best_primary_threshold)
         rows.append({
             "label": label,
             "optimal_threshold": best_primary_threshold,
+            "threshold": best_primary_threshold,
             "optimal_f1_threshold": best_f1_threshold,
-            "optimal_youden_threshold": best_youden_threshold if is_multilabel else math.nan,
-            "validation_f1": primary_f1_final,           # F1 score using primary threshold
-            "validation_f1_at_f1_thresh": best_f1_val,   # F1 score using F1-optimized threshold
-            "validation_f1_at_youden_thresh": youden_f1, # F1 score using Youden-optimized threshold
-            "validation_accuracy": primary_acc, 
-            "validation_balanced_accuracy": primary_bal_acc, 
+            "validation_f1": primary_f1_final,
+            "f1": primary_f1_final,
+            "validation_accuracy": primary_acc,
+            "accuracy": primary_acc,
+            "validation_balanced_accuracy": primary_bal_acc,
+            "balanced_accuracy": primary_bal_acc,
+            "precision": primary_prec,
+            "recall": primary_rec,
+            "auroc": primary_auroc,
+            "auprc": primary_auprc,
         })
 
     return np.asarray(best_thresholds, dtype=np.float32), pd.DataFrame(rows)

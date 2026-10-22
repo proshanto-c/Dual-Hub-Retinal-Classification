@@ -20,7 +20,8 @@ def graph_epoch(
     optimizer: Optional[torch.optim.Optimizer] = None,
     scaler: Any = None,
     desc: str = "Processing",
-    threshold: float = 0.5
+    threshold: float = 0.5,
+    accum_steps: int = 1
 ) -> Dict[str, Any]:
     """
     Executes a single epoch (training or validation) for the Heterogeneous Graph Neural Network.
@@ -37,6 +38,9 @@ def graph_epoch(
     # Wrap the loader in a progress bar
     pbar = tqdm(loader, desc=desc, leave=False)
     
+    if is_training and optimizer is not None and (0 % accum_steps == 0):
+        optimizer.zero_grad(set_to_none=True)
+    
     for i, batch in enumerate(pbar):
         batch = batch.to(device)
         
@@ -46,17 +50,24 @@ def graph_epoch(
                 logits = model(batch)
                 # Reshape batch.y to match logits dynamically
                 loss = criterion(logits, batch.y.view_as(logits).float())
+                if is_training and accum_steps > 1:
+                    loss_scaled = loss / accum_steps
+                else:
+                    loss_scaled = loss
 
             # 2. Backward Pass (Training Only)
             if is_training:
-                optimizer.zero_grad(set_to_none=True)
                 if scaler is not None and amp_enabled:
-                    scaler.scale(loss).backward()
-                    scaler.step(optimizer)
-                    scaler.update()
+                    scaler.scale(loss_scaled).backward()
+                    if (i + 1) % accum_steps == 0 or (i + 1) == len(loader):
+                        scaler.step(optimizer)
+                        scaler.update()
+                        optimizer.zero_grad(set_to_none=True)
                 else:
-                    loss.backward()
-                    optimizer.step()
+                    loss_scaled.backward()
+                    if (i + 1) % accum_steps == 0 or (i + 1) == len(loader):
+                        optimizer.step()
+                        optimizer.zero_grad(set_to_none=True)
 
         # 3. Batch Tracking
         bs = int(batch.y.size(0))

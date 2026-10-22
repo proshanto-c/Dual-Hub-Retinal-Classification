@@ -1,29 +1,69 @@
+# ==============================================================================
+# .gitignore: Context-Aware Heterogeneous Graph Architecture for Fundus Photos
+# Only tracks code and configs necessary and discussed in the paper:
+#   1. Dataset preparation with patient-level stratification
+#   2. Hyperparameter tuning on multilabel, DR, and MF image-only models
+#   3. Hyperparameter checking on the remaining singlelabel image-only models
+#   4. Final training of all 24 models over 3 different seeds
+# ==============================================================================
+
+# 1. Ignore everything by default
 *
 
+# 2. General exclusions
+*.pt
+*.pth
+*.zip
+*.tar.gz
+*.log
+*.tex
+*.md
+.venv/
+env/
+venv/
+wandb/
+runs/
+data/
+logs/
+.vscode/
+scratch/
+
+# 3. Repository Configuration & Environment
 !.gitignore
 !LICENSE
 !README.md
-
-!data_functions/
-!data_functions/**
-
-!utils/
-!utils/** 
-!generate_splits.py
-
-!gnn/
-!gnn/**
-!tune_gnn.py
-
-!tune_convnext.py
-!tune_population_gnn.py
-!tune_film.py
-!tune_all.py
-!submit_tuning.sh
-
-!models/
-!models/**
-
+!requirements.txt
 !environment.yml
 
+# 4. Step 1: Dataset Preparation with Patient-Level Stratification
+!generate_splits.py
+!resize_dataset.py
+!data_functions/
+!data_functions/__init__.py
+!data_functions/BRSETDataSplitter.py
+!data_functions/BRSETGraphDataset.py
+!data_functions/BRSETImageDataset.py
+
+# 5. Step 2: Hyperparameter Tuning (Multilabel, DR, MF Image-Only)
+!tune_hyperparams.py
+!submit_hparam_tuning.sh
+
+# 6. Step 3: Hyperparameter Checking (Remaining 5 Single-Label Image-Only)
+!sweep_remaining_singlelabels.py
+!submit_final_sweep.sh
+
+# 7. Step 4: Final Training & Evaluation (All 24 Models Across 3 Seeds)
+!train_final_models.py
+!submit_final_models.sh
+
+# 8. Core Model Architecture & Shared Utilities
+!gnn/
+!gnn/__init__.py
+!gnn/patientgraphmodel.py
+!utils/
+!utils/*.py
+
+# 9. Explicit overrides: Caches are never tracked
 **/__pycache__/**
+*.py[cod]
+*$py.class

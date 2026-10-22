@@ -43,28 +43,42 @@ def patchify(image: torch.Tensor, patch_size: int):
     return patches, coord_tensor, grid_h, grid_w
 
 
-def grid_edge_index(grid_h: int, grid_w: int, connectivity: int, device=None) -> torch.Tensor:
-    if connectivity not in (4, 8):
-        raise ValueError("connectivity must be 4 or 8")
+def grid_edge_index(grid_h: int, grid_w: int, connectivity: Any = "fc", device=None) -> torch.Tensor:
+    n_patches = grid_h * grid_w
+    conn_str = str(connectivity).lower()
+    
+    if conn_str in ("fc", "fully_connected", "all", "0"):
+        # Fully Connected (FC) patch graph: every patch connects to every other patch
+        src = torch.arange(n_patches, device=device).repeat_interleave(n_patches)
+        dst = torch.arange(n_patches, device=device).repeat(n_patches)
+        mask = src != dst
+        return torch.stack([src[mask], dst[mask]], dim=0)
+    elif connectivity in (4, 8, "4", "8"):
+        c_val = int(connectivity)
+        neighbors_4 = [(0, 1), (1, 0), (-1, 0), (0, -1)]
+        neighbors_8 = neighbors_4 + [(1, 1), (1, -1), (-1, 1), (-1, -1)]
+        neighbors = neighbors_8 if c_val == 8 else neighbors_4
 
-    neighbors_4 = [(0, 1), (1, 0), (-1, 0), (0, -1)]
-    neighbors_8 = neighbors_4 + [(1, 1), (1, -1), (-1, 1), (-1, -1)]
-    neighbors = neighbors_8 if connectivity == 8 else neighbors_4
+        def idx(r: int, c: int) -> int:
+            return r * grid_w + c
 
-    def idx(r: int, c: int) -> int:
-        return r * grid_w + c
+        src, dst = [], []
+        for r in range(grid_h):
+            for c in range(grid_w):
+                i = idx(r, c)
+                for dr, dc in neighbors:
+                    rr, cc = r + dr, c + dc
+                    if 0 <= rr < grid_h and 0 <= cc < grid_w:
+                        src.append(i)
+                        dst.append(idx(rr, cc))
 
-    src, dst = [], []
-    for r in range(grid_h):
-        for c in range(grid_w):
-            i = idx(r, c)
-            for dr, dc in neighbors:
-                rr, cc = r + dr, c + dc
-                if 0 <= rr < grid_h and 0 <= cc < grid_w:
-                    src.append(i)
-                    dst.append(idx(rr, cc))
-
-    return torch.tensor([src, dst], dtype=torch.long, device=device)
+        return torch.tensor([src, dst], dtype=torch.long, device=device)
+    else:
+        # Default fallback to FC
+        src = torch.arange(n_patches, device=device).repeat_interleave(n_patches)
+        dst = torch.arange(n_patches, device=device).repeat(n_patches)
+        mask = src != dst
+        return torch.stack([src[mask], dst[mask]], dim=0)
 
 class BRSETGraphDataset(Dataset):
     """
@@ -79,10 +93,14 @@ class BRSETGraphDataset(Dataset):
         demo_specs: List[Any], 
         image_size: int = 256,
         patch_size: int = 32,
-        connectivity: int = 4,
+        connectivity: Any = "fc",
         transform: Optional[Callable] = None,
         validate_paths: bool = True,
-        prediction_level: str = "patient"
+        prediction_level: str = "patient",
+        train_frame: Optional[pd.DataFrame] = None,
+        label_corr_matrix: Optional[torch.Tensor] = None,
+        demo_corr_matrix: Optional[torch.Tensor] = None,
+        load_images: bool = True,
     ) -> None:
         
         if prediction_level not in ["patient", "image", "dual_hub", "central_hub"]:
@@ -99,6 +117,10 @@ class BRSETGraphDataset(Dataset):
         self.target_cols = target_cols
         self.demo_cols = demo_cols
         self.demo_specs = demo_specs
+        self.train_frame = train_frame
+        self.preset_label_corr = label_corr_matrix
+        self.preset_demo_corr = demo_corr_matrix
+        self.load_images = load_images
         
         self.image_size = image_size
         self.patch_size = patch_size
@@ -120,47 +142,72 @@ class BRSETGraphDataset(Dataset):
         self.n_patches = self.grid_h * self.grid_w
         
         # 1. Cache Spatial Adjacency
-        adj = grid_edge_index(self.grid_h, self.grid_w, self.connectivity, device=torch.device('cpu'))
-        self.base_patch_adj_src = adj[0]
-        self.base_patch_adj_dst = adj[1]
-        
-        # Calculate Gaussian distance weight for patch adjacency
-        src_y, src_x = self.base_patch_adj_src // self.grid_w, self.base_patch_adj_src % self.grid_w
-        dst_y, dst_x = self.base_patch_adj_dst // self.grid_w, self.base_patch_adj_dst % self.grid_w
-        dist_sq = (src_y - dst_y)**2 + (src_x - dst_x)**2
-        sigma_sq = (self.grid_w / 2.0)**2  # Gaussian spread heuristic
-        self.base_patch_adj_attr = torch.exp(-dist_sq / sigma_sq).unsqueeze(-1).to(torch.float32)
+        conn_str = str(self.connectivity).lower()
+        if conn_str in ("fc", "sdpa", "dense", "none", "transformer"):
+            # Dense SDPA handles patch-to-patch attention via PyTorch FlashAttention;
+            # no sparse graph edges needed in PyG.
+            self.base_patch_adj_src = None
+            self.base_patch_adj_dst = None
+            self.base_patch_adj_attr = None
+        else:
+            adj = grid_edge_index(self.grid_h, self.grid_w, self.connectivity, device=torch.device('cpu'))
+            self.base_patch_adj_src = adj[0]
+            self.base_patch_adj_dst = adj[1]
+            
+            # Calculate Gaussian distance weight for patch adjacency
+            src_y, src_x = self.base_patch_adj_src // self.grid_w, self.base_patch_adj_src % self.grid_w
+            dst_y, dst_x = self.base_patch_adj_dst // self.grid_w, self.base_patch_adj_dst % self.grid_w
+            dist_sq = (src_y - dst_y)**2 + (src_x - dst_x)**2
+            sigma_sq = (self.grid_w / 2.0)**2  # Gaussian spread heuristic
+            self.base_patch_adj_attr = torch.exp(-dist_sq / sigma_sq).unsqueeze(-1).to(torch.float32)
         
         # 2. Cache Hierarchical Adjacency
         self.base_patch_to_img_src = torch.arange(self.n_patches, dtype=torch.long)
         self.base_patch_to_img_dst = torch.zeros(self.n_patches, dtype=torch.long)
 
     def _cache_correlations(self) -> None:
-        """Calculates Pearson correlation matrices for labels and demographics on the training split."""
-        # Label correlation
-        if len(self.target_cols) > 1:
-            lbl_df = self.frame[self.target_cols].astype(float)
-            corr = lbl_df.corr(method="pearson").fillna(0.0).values
+        """Calculates Pearson correlation matrices for labels and demographics strictly from the training split."""
+        if self.preset_label_corr is not None and self.preset_demo_corr is not None:
+            self.label_corr_matrix = self.preset_label_corr
+            self.demo_corr_matrix = self.preset_demo_corr
+            return
+
+        ref_df = self.train_frame
+        if ref_df is None:
+            raise ValueError(
+                "BRSETGraphDataset strictly requires `train_frame` to compute Pearson correlation matrices "
+                "from the training split. Passing non-training data without `train_frame` is strictly forbidden."
+            )
+
+        # 1. Label correlation
+        if self.preset_label_corr is not None:
+            self.label_corr_matrix = self.preset_label_corr
         else:
-            corr = np.array([[1.0]])
-        self.label_corr_matrix = torch.tensor(corr, dtype=torch.float32)
+            if len(self.target_cols) > 1:
+                lbl_df = ref_df[self.target_cols].astype(float)
+                corr = lbl_df.corr(method="pearson").fillna(0.0).values
+            else:
+                corr = np.array([[1.0]])
+            self.label_corr_matrix = torch.tensor(corr, dtype=torch.float32)
         
-        # Demographic correlation
-        demo_names = [s.name for s in self.demo_specs]
-        if len(demo_names) > 1:
-            # We convert categorical to numeric codes for correlation
-            demo_df = self.frame[demo_names].copy()
-            for s in self.demo_specs:
-                if s.kind == "categorical":
-                    demo_df[s.name] = demo_df[s.name].astype("category").cat.codes
-                else:
-                    if demo_df[s.name].dtype == object:
-                        demo_df[s.name] = demo_df[s.name].str.replace(',', '.', regex=False)
-                    demo_df[s.name] = pd.to_numeric(demo_df[s.name], errors="coerce")
-            demo_corr = demo_df.corr(method="pearson").fillna(0.0).values
+        # 2. Demographic correlation
+        if self.preset_demo_corr is not None:
+            self.demo_corr_matrix = self.preset_demo_corr
         else:
-            demo_corr = np.array([[1.0]])
-        self.demo_corr_matrix = torch.tensor(demo_corr, dtype=torch.float32)
+            demo_names = [s.name for s in self.demo_specs]
+            if len(demo_names) > 1:
+                demo_df = ref_df[demo_names].copy()
+                for s in self.demo_specs:
+                    if s.kind == "categorical":
+                        demo_df[s.name] = demo_df[s.name].astype("category").cat.codes
+                    else:
+                        if demo_df[s.name].dtype == object:
+                            demo_df[s.name] = demo_df[s.name].str.replace(',', '.', regex=False)
+                        demo_df[s.name] = pd.to_numeric(demo_df[s.name], errors="coerce")
+                demo_corr = demo_df.corr(method="pearson").fillna(0.0).values
+            else:
+                demo_corr = np.array([[1.0]])
+            self.demo_corr_matrix = torch.tensor(demo_corr, dtype=torch.float32)
 
     def _build_samples(self, validate: bool) -> None:
         """Constructs either multi-image patient hubs or single-image standalone graphs."""
@@ -173,8 +220,11 @@ class BRSETGraphDataset(Dataset):
                 
                 for _, row in group.iterrows():
                     raw_path = row.get("image_path", f"{row['image_id']}.jpg")
-                    p = Path(raw_path)
-                    p = p if p.is_absolute() else self.image_dir / p.name
+                    filename = Path(raw_path).name
+                    if self.image_dir and (self.image_dir / filename).is_file():
+                        p = self.image_dir / filename
+                    else:
+                        p = Path(raw_path) if Path(raw_path).is_absolute() else self.image_dir / filename
                     
                     if validate and not p.is_file():
                         raise FileNotFoundError(f"Missing image: {p}")
@@ -198,8 +248,11 @@ class BRSETGraphDataset(Dataset):
             # --- BATCH BY IMAGE ---
             for _, row in self.frame.iterrows():
                 raw_path = row.get("image_path", f"{row['image_id']}.jpg")
-                p = Path(raw_path)
-                p = p if p.is_absolute() else self.image_dir / p.name
+                filename = Path(raw_path).name
+                if self.image_dir and (self.image_dir / filename).is_file():
+                    p = self.image_dir / filename
+                else:
+                    p = Path(raw_path) if Path(raw_path).is_absolute() else self.image_dir / filename
                 
                 if validate and not p.is_file():
                     raise FileNotFoundError(f"Missing image: {p}")
@@ -294,19 +347,19 @@ class BRSETGraphDataset(Dataset):
         )
         
         # --- RESNET INTEGRATION: LOAD RAW IMAGES ---
-        image_tensors = []
-        for path in sample["image_paths"]:
-            with Image.open(path) as img:
-                img = img.convert("RGB")
-                if self.transform:
-                    img = self.transform(img) # MUST include Resize((256, 256))
-                if not isinstance(img, torch.Tensor):
-                    img = transforms.ToTensor()(img)
-            image_tensors.append(img)
-            
-        # Store the stacked images in the graph object!
-        # PyG will automatically batch these into [Batch_Size_Images, 3, 256, 256]
-        data["image"].raw_images = torch.stack(image_tensors, dim=0)
+        if self.load_images:
+            image_tensors = []
+            for path in sample["image_paths"]:
+                with Image.open(path) as img:
+                    img = img.convert("RGB")
+                    if self.transform:
+                        img = self.transform(img) # MUST include Resize((256, 256))
+                    if not isinstance(img, torch.Tensor):
+                        img = transforms.ToTensor()(img)
+                image_tensors.append(img)
+            data["image"].raw_images = torch.stack(image_tensors, dim=0)
+        else:
+            data["image"].raw_images = torch.empty((num_images, 3, 1, 1), dtype=torch.float32)
         
         # --- RESNET INTEGRATION: SETUP EMPTY PATCH NODES ---
         # We need 64 patches per image. We create an empty tensor so PyG doesn't crash 
@@ -325,8 +378,9 @@ class BRSETGraphDataset(Dataset):
         for img_idx in range(num_images):
             patch_offset = img_idx * self.n_patches
             
-            p_adj_src.append(self.base_patch_adj_src + patch_offset)
-            p_adj_dst.append(self.base_patch_adj_dst + patch_offset)
+            if self.base_patch_adj_src is not None:
+                p_adj_src.append(self.base_patch_adj_src + patch_offset)
+                p_adj_dst.append(self.base_patch_adj_dst + patch_offset)
             
             shifted_p2i_src = self.base_patch_to_img_src + patch_offset
             shifted_p2i_dst = self.base_patch_to_img_dst + img_idx
@@ -341,20 +395,21 @@ class BRSETGraphDataset(Dataset):
             pat2i_src.append(torch.tensor([0], dtype=torch.long))
             pat2i_dst.append(torch.tensor([img_idx], dtype=torch.long))
             
-        data[("patch", "adjacent", "patch")].edge_index = torch.stack([torch.cat(p_adj_src), torch.cat(p_adj_dst)], dim=0)
-        data[("patch", "adjacent", "patch")].edge_attr = self.base_patch_adj_attr.repeat(num_images, 1)
+        if self.base_patch_adj_src is not None and len(p_adj_src) > 0:
+            data[("patch", "adjacent", "patch")].edge_index = torch.stack([torch.cat(p_adj_src), torch.cat(p_adj_dst)], dim=0)
+            data[("patch", "adjacent", "patch")].edge_attr = self.base_patch_adj_attr.repeat(num_images, 1)
         
         data[("patch", "to", "image")].edge_index = torch.stack([torch.cat(p2i_src), torch.cat(p2i_dst)], dim=0)
-        data[("patch", "to", "image")].edge_attr = torch.rand((data[("patch", "to", "image")].edge_index.size(1), 1), dtype=torch.float32)
+        data[("patch", "to", "image")].edge_attr = torch.ones((data[("patch", "to", "image")].edge_index.size(1), 1), dtype=torch.float32)
         
         data[("image", "to", "patch")].edge_index = torch.stack([torch.cat(i2p_src), torch.cat(i2p_dst)], dim=0)
-        data[("image", "to", "patch")].edge_attr = torch.rand((data[("image", "to", "patch")].edge_index.size(1), 1), dtype=torch.float32)
+        data[("image", "to", "patch")].edge_attr = torch.ones((data[("image", "to", "patch")].edge_index.size(1), 1), dtype=torch.float32)
         
         data[("image", "to", "patient")].edge_index = torch.stack([torch.cat(i2pat_src), torch.cat(i2pat_dst)], dim=0)
-        data[("image", "to", "patient")].edge_attr = torch.rand((data[("image", "to", "patient")].edge_index.size(1), 1), dtype=torch.float32)
+        data[("image", "to", "patient")].edge_attr = torch.ones((data[("image", "to", "patient")].edge_index.size(1), 1), dtype=torch.float32)
         
         data[("patient", "to", "image")].edge_index = torch.stack([torch.cat(pat2i_src), torch.cat(pat2i_dst)], dim=0)
-        data[("patient", "to", "image")].edge_attr = torch.rand((data[("patient", "to", "image")].edge_index.size(1), 1), dtype=torch.float32)
+        data[("patient", "to", "image")].edge_attr = torch.ones((data[("patient", "to", "image")].edge_index.size(1), 1), dtype=torch.float32)
             
     def _attach_structural_edges(self, data: HeteroData, num_labels: int, num_images: int) -> None:
         num_demo = len(self.demo_specs)
@@ -376,10 +431,10 @@ class BRSETGraphDataset(Dataset):
             data[("demographic", "correlates", "demographic")].edge_attr = torch.empty((0, 1), dtype=torch.float32)
         
         data[("demographic", "to", "patient")].edge_index = torch.tensor([list(range(num_demo)), [0] * num_demo], dtype=torch.long)
-        data[("demographic", "to", "patient")].edge_attr = torch.rand((num_demo, 1), dtype=torch.float32)
+        data[("demographic", "to", "patient")].edge_attr = torch.ones((num_demo, 1), dtype=torch.float32)
         
         data[("patient", "to", "demographic")].edge_index = torch.tensor([[0] * num_demo, list(range(num_demo))], dtype=torch.long)
-        data[("patient", "to", "demographic")].edge_attr = torch.rand((num_demo, 1), dtype=torch.float32)
+        data[("patient", "to", "demographic")].edge_attr = torch.ones((num_demo, 1), dtype=torch.float32)
         
         corr_src, corr_dst, corr_attr = [], [], []
         for i in range(num_labels):
@@ -389,15 +444,19 @@ class BRSETGraphDataset(Dataset):
                     corr_dst.append(j)
                     corr_attr.append([self.label_corr_matrix[i, j].item()])
                     
-        data[("label", "correlates", "label")].edge_index = torch.tensor([corr_src, corr_dst], dtype=torch.long)
-        data[("label", "correlates", "label")].edge_attr = torch.tensor(corr_attr, dtype=torch.float32)
+        if len(corr_src) > 0:
+            data[("label", "correlates", "label")].edge_index = torch.tensor([corr_src, corr_dst], dtype=torch.long)
+            data[("label", "correlates", "label")].edge_attr = torch.tensor(corr_attr, dtype=torch.float32)
+        else:
+            data[("label", "correlates", "label")].edge_index = torch.empty((2, 0), dtype=torch.long)
+            data[("label", "correlates", "label")].edge_attr = torch.empty((0, 1), dtype=torch.float32)
         
         if self.prediction_level in ["patient", "dual_hub"]:
             data[("patient", "to", "label")].edge_index = torch.tensor([[0] * num_labels, list(range(num_labels))], dtype=torch.long)
-            data[("patient", "to", "label")].edge_attr = torch.rand((num_labels, 1), dtype=torch.float32)
+            data[("patient", "to", "label")].edge_attr = torch.ones((num_labels, 1), dtype=torch.float32)
             
             data[("label", "to", "patient")].edge_index = torch.tensor([list(range(num_labels)), [0] * num_labels], dtype=torch.long)
-            data[("label", "to", "patient")].edge_attr = torch.rand((num_labels, 1), dtype=torch.float32)
+            data[("label", "to", "patient")].edge_attr = torch.ones((num_labels, 1), dtype=torch.float32)
             
         if self.prediction_level in ["image", "dual_hub"]:
             img_src, lbl_dst = [], []
@@ -406,26 +465,26 @@ class BRSETGraphDataset(Dataset):
                 lbl_dst.extend(list(range(num_labels)))
                 
             data[("image", "to", "label")].edge_index = torch.tensor([img_src, lbl_dst], dtype=torch.long)
-            data[("image", "to", "label")].edge_attr = torch.rand((len(img_src), 1), dtype=torch.float32)
+            data[("image", "to", "label")].edge_attr = torch.ones((len(img_src), 1), dtype=torch.float32)
             
             data[("label", "to", "image")].edge_index = torch.tensor([lbl_dst, img_src], dtype=torch.long)
-            data[("label", "to", "image")].edge_attr = torch.rand((len(lbl_dst), 1), dtype=torch.float32)
+            data[("label", "to", "image")].edge_attr = torch.ones((len(lbl_dst), 1), dtype=torch.float32)
             
         if self.prediction_level == "central_hub":
             # Image <-> Central
             data[("image", "to", "central")].edge_index = torch.tensor([list(range(num_images)), [0] * num_images], dtype=torch.long)
-            data[("image", "to", "central")].edge_attr = torch.rand((num_images, 1), dtype=torch.float32)
+            data[("image", "to", "central")].edge_attr = torch.ones((num_images, 1), dtype=torch.float32)
             data[("central", "to", "image")].edge_index = torch.tensor([[0] * num_images, list(range(num_images))], dtype=torch.long)
-            data[("central", "to", "image")].edge_attr = torch.rand((num_images, 1), dtype=torch.float32)
+            data[("central", "to", "image")].edge_attr = torch.ones((num_images, 1), dtype=torch.float32)
             
             # Patient <-> Central
             data[("patient", "to", "central")].edge_index = torch.tensor([[0], [0]], dtype=torch.long)
-            data[("patient", "to", "central")].edge_attr = torch.rand((1, 1), dtype=torch.float32)
+            data[("patient", "to", "central")].edge_attr = torch.ones((1, 1), dtype=torch.float32)
             data[("central", "to", "patient")].edge_index = torch.tensor([[0], [0]], dtype=torch.long)
-            data[("central", "to", "patient")].edge_attr = torch.rand((1, 1), dtype=torch.float32)
+            data[("central", "to", "patient")].edge_attr = torch.ones((1, 1), dtype=torch.float32)
             
             # Label <-> Central
             data[("label", "to", "central")].edge_index = torch.tensor([list(range(num_labels)), [0] * num_labels], dtype=torch.long)
-            data[("label", "to", "central")].edge_attr = torch.rand((num_labels, 1), dtype=torch.float32)
+            data[("label", "to", "central")].edge_attr = torch.ones((num_labels, 1), dtype=torch.float32)
             data[("central", "to", "label")].edge_index = torch.tensor([[0] * num_labels, list(range(num_labels))], dtype=torch.long)
-            data[("central", "to", "label")].edge_attr = torch.rand((num_labels, 1), dtype=torch.float32)
+            data[("central", "to", "label")].edge_attr = torch.ones((num_labels, 1), dtype=torch.float32)
