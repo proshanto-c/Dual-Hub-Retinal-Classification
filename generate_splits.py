@@ -17,8 +17,8 @@ def parse_args() -> argparse.Namespace:
         "--split-basis", 
         type=str, 
         choices=["image", "patient"], 
-        default="image",
-        help="Whether to calculate stratifications based on individual images or group by patient."
+        default="patient",
+        help="Whether to calculate stratifications based on individual images or group by patient (default: patient)."
     )
     parser.add_argument(
         "--train-ratio", type=float, default=0.7, help="Proportion of data for training."
@@ -33,8 +33,10 @@ def parse_args() -> argparse.Namespace:
         "--seed", type=int, default=42, help="Random seed for reproducibility."
     )
     parser.add_argument(
-        "--target-labels", nargs="*", default=["diabetic_retinopathy", "macular_edema", "amd", 
-                                               "myopic_fundus", "increased_cup_disc"], help="Target labels."
+        "--target-labels", nargs="*", default=[
+            "increased_cup_disc", "drusens", "diabetic_retinopathy", 
+            "macular_edema", "scar", "amd", "myopic_fundus"
+        ], help="Target labels for patient-level multilabel stratification."
     )
     parser.add_argument(
         "--keep-inadequate", 

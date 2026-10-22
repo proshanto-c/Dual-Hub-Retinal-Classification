@@ -6,36 +6,45 @@
 #SBATCH --gres=gpu:1                # Request 1 GPU
 #SBATCH --time=47:59:00             # Max time limit
 #SBATCH --job-name=final_models
-#SBATCH --array=0-17                # 18 cluster models (5 singlelabels + 1 multilabel) x 3 modalities
+#SBATCH --array=0-20                # 21 cluster models (6 singlelabels + 1 multilabel) x 3 modalities
 #SBATCH --output=logs/final_models_%A_%a.out
 #SBATCH --error=logs/final_models_%A_%a.err
 
 # ==============================================================================
-# SLURM ARRAY SUBMISSION FOR FINAL 512H CLUSTER MODELS (SINGLELABEL & MULTILABEL)
+# SLURM ARRAY SUBMISSION FOR FINAL CLUSTER MODELS (SINGLELABEL & MULTILABEL)
 #
 # Covers:
-#   - diabetic_retinopathy (ctx_only, image_only, img_ctx)
-#   - increased_cup_disc   (ctx_only, image_only, img_ctx)
-#   - macular_edema        (ctx_only, image_only, img_ctx)
-#   - scar                 (ctx_only, image_only, img_ctx)
-#   - amd                  (ctx_only, image_only, img_ctx)
-#   - multilabel           (ctx_only, image_only, img_ctx)
+#   - drusens              (128h / 0.25d) (ctx_only, image_only, img_ctx)
+#   - diabetic_retinopathy (512h / 0.15d) (ctx_only, image_only, img_ctx)
+#   - increased_cup_disc   (512h / 0.15d) (ctx_only, image_only, img_ctx)
+#   - macular_edema        (512h / 0.15d) (ctx_only, image_only, img_ctx)
+#   - scar                 (512h / 0.15d) (ctx_only, image_only, img_ctx)
+#   - amd                  (512h / 0.15d) (ctx_only, image_only, img_ctx)
+#   - multilabel           (512h / 0.15d) (ctx_only, image_only, img_ctx)
 #
 # Usage:
 #   sbatch submit_final_models.sh [SEED] [EXTRA_ARGS...]
 #
 # Examples:
-#   # 1. Run all 18 cluster models in parallel (Array 0-17):
+#   # 1. Run all 21 cluster models for Seed 42 in parallel (Array 0-20):
 #   sbatch submit_final_models.sh 42
 #
-#   # 2. Run ONLY the 3 multilabel models (ctx_only, image_only, img_ctx):
+#   # 2. Run across 3 different seeds (e.g. 42, 12, 3):
+#   sbatch submit_final_models.sh 42
+#   sbatch submit_final_models.sh 12
+#   sbatch submit_final_models.sh 3
+#
+#   # 3. Run ONLY the 3 multilabel models (ctx_only, image_only, img_ctx):
 #   sbatch --array=0-2 submit_final_models.sh 42 --labels multilabel
 #
-#   # 3. Run ONLY single-label cluster models (15 models across Array 0-14):
-#   sbatch --array=0-14 submit_final_models.sh 42 --type singlelabel
+#   # 4. Run ONLY single-label cluster models (18 models across Array 0-17):
+#   sbatch --array=0-17 submit_final_models.sh 42 --type singlelabel
 #
-#   # 4. Run all cluster models for multimodal img_ctx only (6 models):
-#   sbatch --array=0-5 submit_final_models.sh 42 --modalities img_ctx
+#   # 5. Run ONLY drusen models (3 models across Array 0-2):
+#   sbatch --array=0-2 submit_final_models.sh 42 --labels drusens
+#
+#   # 6. Run all cluster models for multimodal img_ctx only (7 models across Array 0-6):
+#   sbatch --array=0-6 submit_final_models.sh 42 --modalities img_ctx
 # ==============================================================================
 
 # 1. Activate Environment
@@ -50,7 +59,7 @@ PROJECT="Final-Fundus-Models"
 OUTPUT_DIR="/users/sann7128/ca-mlc-refactor/data/BRSET/runs/final_models_${SEED}"
 
 # If running within a SLURM job array, prioritize SLURM_ARRAY_TASK_COUNT
-SPLIT_TOTAL=${SLURM_ARRAY_TASK_COUNT:-18}
+SPLIT_TOTAL=${SLURM_ARRAY_TASK_COUNT:-21}
 
 # 4. Run Final Training Script for Cluster Tier (512h / 0.15d)
 python train_final_models.py \

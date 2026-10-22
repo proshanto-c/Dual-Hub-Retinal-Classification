@@ -3,9 +3,9 @@
 Final Model Training Runner for Single-Label and Multilabel Fundus Classification.
 
 Hyperparameter Policy:
-  - 128 hidden, 0.25 dropout (Tier: Local):
-      • myopic_fundus
-      • drusens
+  - 128 hidden, 0.25 dropout:
+      • myopic_fundus (Tier: Local)
+      • drusens (Tier: Cluster)
   - 512 hidden, 0.15 dropout (Tier: Cluster):
       • diabetic_retinopathy
       • increased_cup_disc
@@ -20,24 +20,25 @@ Modalities per target:
   3. img_ctx    (use_context=True,  use_image_features=True)
 
 Totals:
-  - Local Tier:    2 labels x 3 modalities = 6 models
-  - Cluster Tier:  6 targets (5 singlelabel + 1 multilabel) x 3 modalities = 18 models
+  - Local Tier:    1 target (myopic_fundus) x 3 modalities = 3 models
+  - Cluster Tier:  7 targets (drusens + 5 singlelabel + 1 multilabel) x 3 modalities = 21 models
   - Study Total:   24 models
 
 Usage Examples:
-  # Run all 6 local models (myopic_fundus, drusens across 3 modalities):
+  # Run all 3 local models (myopic_fundus across 3 modalities):
   python train_final_models.py --root "data/BRSET" --tier local
 
   # Run only multilabel models (ctx_only, image_only, img_ctx):
   python train_final_models.py --root "data/BRSET" --labels multilabel
 
-  # Run all 18 cluster models via SLURM:
+  # Run all 21 cluster models via SLURM:
   sbatch submit_final_models.sh 42
 """
 
 import argparse
 import gc
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -92,8 +93,10 @@ TARGET_POLICIES = {
         "is_multilabel": False,
         "labels": ["myopic_fundus"],
     },
+
+    # --- Tier: CLUSTER (128h / 0.25d Single-Label) ---
     "drusens": {
-        "tier": "local",
+        "tier": "cluster",
         "pretty_name": "Drusen",
         "hidden_dim": 128,
         "dropout": 0.25,
@@ -239,7 +242,7 @@ def parse_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
         type=str,
         default="all",
         choices=["all", "local", "cluster"],
-        help="Tier of models to run: 'local' (128h: MF, Drusen), 'cluster' (512h: DR, ICD, ME, Scar, AMD, Multilabel), or 'all' (default: all).",
+        help="Tier of models to run: 'local' (128h: Myopic Fundus), 'cluster' (128h: Drusen; 512h: DR, ICD, ME, Scar, AMD, Multilabel), or 'all' (default: all).",
     )
     p.add_argument(
         "--type",
@@ -272,10 +275,12 @@ def parse_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--device", choices=["auto", "cuda", "cpu"], default="auto")
     p.add_argument("--deterministic", action="store_true")
     p.add_argument("--no-amp", action="store_true")
-    p.add_argument("--threshold", type=float, default=0.5)
+    p.add_argument("--threshold", type=float, default=0.5, help="Default fixed evaluation threshold (default: 0.5).")
+    p.add_argument("--threshold-step", type=float, default=0.001, help="Sweep increment for optimal threshold calibration (default: 0.001).")
     p.add_argument("--num-workers", type=int, default=8)
     p.add_argument("--compile", action="store_true", help="Compile model with torch.compile (disabled by default).")
     p.add_argument("--force", action="store_true", help="Force retrain models even if completed checkpoints exist.")
+    p.add_argument("--re-evaluate", action="store_true", help="Re-evaluate saved checkpoints on validation and test sets without retraining.")
 
     # Splitting for SLURM Job Arrays
     p.add_argument("--split-total", type=int, default=1, help="Total number of parallel jobs.")
@@ -382,6 +387,58 @@ def write_json(path: Path, data: Any) -> None:
         json.dump(data, f, indent=4)
 
 
+def format_per_label_table(df_or_dict: Any, title: str) -> str:
+    """Formats a clean tabular view of per-label metrics across all 7 evaluation outputs."""
+    lines = [
+        f"\n--- {title} ---",
+        f"{'Label':<24} {'AUPRC':<9} {'AUROC':<9} {'F1':<9} {'Accuracy':<10} {'Bal_Acc':<10} {'Precision':<10} {'Recall':<9} {'Threshold':<9}",
+        "-" * 105
+    ]
+    if isinstance(df_or_dict, pd.DataFrame):
+        for _, r in df_or_dict.iterrows():
+            lbl = r["label"]
+            auprc_val = r.get("auprc", r.get("AUPRC", float("nan")))
+            auroc_val = r.get("auroc", r.get("AUROC", float("nan")))
+            f1_val = r.get("f1", r.get("F1", float("nan")))
+            acc_val = r.get("accuracy", r.get("Accuracy", float("nan")))
+            bal_acc_val = r.get("balanced_accuracy", r.get("Balanced_Accuracy", float("nan")))
+            prec_val = r.get("precision", r.get("Precision", float("nan")))
+            rec_val = r.get("recall", r.get("Recall", float("nan")))
+            thresh_val = r.get("threshold", r.get("Optimal_Threshold", float("nan")))
+
+            auprc_s = f"{float(auprc_val):.4f}" if not math.isnan(float(auprc_val)) else "N/A"
+            auroc_s = f"{float(auroc_val):.4f}" if not math.isnan(float(auroc_val)) else "N/A"
+            f1_s = f"{float(f1_val):.4f}" if not math.isnan(float(f1_val)) else "N/A"
+            acc_s = f"{float(acc_val):.4f}" if not math.isnan(float(acc_val)) else "N/A"
+            bal_acc_s = f"{float(bal_acc_val):.4f}" if not math.isnan(float(bal_acc_val)) else "N/A"
+            prec_s = f"{float(prec_val):.4f}" if not math.isnan(float(prec_val)) else "N/A"
+            rec_s = f"{float(rec_val):.4f}" if not math.isnan(float(rec_val)) else "N/A"
+            thresh_s = f"{float(thresh_val):.4f}" if not math.isnan(float(thresh_val)) else "N/A"
+            lines.append(f"{lbl:<24} {auprc_s:<9} {auroc_s:<9} {f1_s:<9} {acc_s:<10} {bal_acc_s:<10} {prec_s:<10} {rec_s:<9} {thresh_s:<9}")
+    elif isinstance(df_or_dict, dict):
+        for lbl, r in df_or_dict.items():
+            auprc_val = r.get("AUPRC", r.get("auprc", float("nan")))
+            auroc_val = r.get("AUROC", r.get("auroc", float("nan")))
+            f1_val = r.get("F1", r.get("f1", r.get("Calibrated_F1", float("nan"))))
+            acc_val = r.get("Accuracy", r.get("accuracy", float("nan")))
+            bal_acc_val = r.get("Balanced_Accuracy", r.get("balanced_accuracy", float("nan")))
+            prec_val = r.get("Precision", r.get("precision", float("nan")))
+            rec_val = r.get("Recall", r.get("recall", float("nan")))
+            thresh_val = r.get("Optimal_Threshold", r.get("threshold", float("nan")))
+
+            auprc_s = f"{float(auprc_val):.4f}" if not math.isnan(float(auprc_val)) else "N/A"
+            auroc_s = f"{float(auroc_val):.4f}" if not math.isnan(float(auroc_val)) else "N/A"
+            f1_s = f"{float(f1_val):.4f}" if not math.isnan(float(f1_val)) else "N/A"
+            acc_s = f"{float(acc_val):.4f}" if not math.isnan(float(acc_val)) else "N/A"
+            bal_acc_s = f"{float(bal_acc_val):.4f}" if not math.isnan(float(bal_acc_val)) else "N/A"
+            prec_s = f"{float(prec_val):.4f}" if not math.isnan(float(prec_val)) else "N/A"
+            rec_s = f"{float(rec_val):.4f}" if not math.isnan(float(rec_val)) else "N/A"
+            thresh_s = f"{float(thresh_val):.4f}" if not math.isnan(float(thresh_val)) else "N/A"
+            lines.append(f"{lbl:<24} {auprc_s:<9} {auroc_s:<9} {f1_s:<9} {acc_s:<10} {bal_acc_s:<10} {prec_s:<10} {rec_s:<9} {thresh_s:<9}")
+    lines.append("-" * 105)
+    return "\n".join(lines)
+
+
 def print_final_summary(output_dir: Path) -> None:
     """Scans output_dir for completed model evaluation results and prints consolidated validation and test comparison tables."""
     val_summary_data: Dict[str, Dict[str, Any]] = {}
@@ -404,7 +461,10 @@ def print_final_summary(output_dir: Path) -> None:
                             "macro_auprc": data.get("final_val_macro_auprc", 0.0),
                             "macro_auroc": data.get("final_val_macro_auroc", 0.0),
                             "calibrated_f1": data.get("final_val_macro_f1_calibrated", 0.0),
+                            "accuracy": data.get("final_val_macro_accuracy", 0.0),
+                            "balanced_accuracy": data.get("final_val_balanced_accuracy", 0.0),
                             "best_epoch": data.get("best_epoch", 0),
+                            "per_label": data.get("per_label", data.get("per_label_metrics", {})),
                         }
                 except Exception:
                     pass
@@ -418,7 +478,10 @@ def print_final_summary(output_dir: Path) -> None:
                             "macro_auprc": tdata.get("test_macro_auprc", 0.0),
                             "macro_auroc": tdata.get("test_macro_auroc", 0.0),
                             "calibrated_f1": tdata.get("test_macro_f1_calibrated", 0.0),
+                            "accuracy": tdata.get("test_macro_accuracy_calibrated", 0.0),
+                            "balanced_accuracy": tdata.get("test_macro_balanced_accuracy", 0.0),
                             "best_epoch": tdata.get("best_epoch", 0),
+                            "per_label": tdata.get("per_label", tdata.get("per_label_metrics", {})),
                         }
                 except Exception:
                     pass
@@ -431,13 +494,13 @@ def print_final_summary(output_dir: Path) -> None:
     if not val_summary_data and not test_summary_data:
         return
 
-    # Table 1: Validation Results
+    # Table 1: Validation Results (Macro AUPRC)
     if val_summary_data:
-        print("\n" + "=" * 102)
+        print("\n" + "=" * 105)
         print(" FINAL TRAINING: VALIDATION PERFORMANCE (MACRO AUPRC COMPARISON)")
-        print("=" * 102)
+        print("=" * 105)
         print(f"{'Target Model':<32} {'Tier':<8} {'Config':<12} {'ctx_only':<14} {'image_only':<14} {'img_ctx':<14} {'Best Modality':<14}")
-        print("-" * 102)
+        print("-" * 105)
 
         for target_key, mods in val_summary_data.items():
             pol = TARGET_POLICIES.get(target_key, {})
@@ -457,15 +520,15 @@ def print_final_summary(output_dir: Path) -> None:
                     best_mod = m
 
             print(f"{pretty:<32} {tier:<8} {cfg_str:<12} {ctx_s:<14} {img_s:<14} {both_s:<14} {best_mod:<14}")
-        print("=" * 102)
+        print("=" * 105)
 
-    # Table 2: Held-out Test Results
+    # Table 2: Held-out Test Results (Macro AUPRC)
     if test_summary_data:
-        print("\n" + "=" * 102)
+        print("\n" + "=" * 105)
         print(" FINAL TRAINING: HELD-OUT TEST EVALUATION (MACRO AUPRC COMPARISON)")
-        print("=" * 102)
+        print("=" * 105)
         print(f"{'Target Model':<32} {'Tier':<8} {'Config':<12} {'ctx_only':<14} {'image_only':<14} {'img_ctx':<14} {'Best Modality':<14}")
-        print("-" * 102)
+        print("-" * 105)
 
         for target_key, mods in test_summary_data.items():
             pol = TARGET_POLICIES.get(target_key, {})
@@ -485,7 +548,34 @@ def print_final_summary(output_dir: Path) -> None:
                     best_mod = m
 
             print(f"{pretty:<32} {tier:<8} {cfg_str:<12} {ctx_s:<14} {img_s:<14} {both_s:<14} {best_mod:<14}")
-        print("=" * 102 + "\n")
+        print("=" * 105)
+
+        # Table 3: Held-out Test Results (Calibrated F1)
+        print("\n" + "=" * 105)
+        print(" FINAL TRAINING: HELD-OUT TEST EVALUATION (OPTIMAL CALIBRATED F1 COMPARISON)")
+        print("=" * 105)
+        print(f"{'Target Model':<32} {'Tier':<8} {'Config':<12} {'ctx_only':<14} {'image_only':<14} {'img_ctx':<14} {'Best Modality':<14}")
+        print("-" * 105)
+
+        for target_key, mods in test_summary_data.items():
+            pol = TARGET_POLICIES.get(target_key, {})
+            pretty = pol.get("pretty_name", target_key)
+            tier = pol.get("tier", "unknown")
+            cfg_str = f"{pol.get('hidden_dim', 0)}h/{pol.get('dropout', 0.0)}d"
+
+            ctx_s = f"{mods['ctx_only']['calibrated_f1']:.4f}" if "ctx_only" in mods else "---"
+            img_s = f"{mods['image_only']['calibrated_f1']:.4f}" if "image_only" in mods else "---"
+            both_s = f"{mods['img_ctx']['calibrated_f1']:.4f}" if "img_ctx" in mods else "---"
+
+            best_mod = "---"
+            best_score = -1.0
+            for m, vals in mods.items():
+                if vals["calibrated_f1"] > best_score:
+                    best_score = vals["calibrated_f1"]
+                    best_mod = m
+
+            print(f"{pretty:<32} {tier:<8} {cfg_str:<12} {ctx_s:<14} {img_s:<14} {both_s:<14} {best_mod:<14}")
+        print("=" * 105 + "\n")
 
     combined_summary = {
         "validation": val_summary_data,
@@ -553,14 +643,34 @@ def main() -> None:
 
     # 2. Resolve Manifests, Preprocess Clinical Context, and Load Test Split
     if args.train_manifest is None:
-        cand = prepared_dir / f"image_train_{args.seed}.csv"
-        args.train_manifest = cand.name if cand.exists() else "image_train_12.csv"
+        cand_img = prepared_dir / f"image_train_{args.seed}.csv"
+        cand_pat = prepared_dir / f"patient_train_{args.seed}.csv"
+        if cand_img.exists():
+            args.train_manifest = cand_img.name
+        elif cand_pat.exists():
+            args.train_manifest = cand_pat.name
+        else:
+            args.train_manifest = "image_train_12.csv"
+
     if args.validation_manifest is None:
-        cand = prepared_dir / f"image_validation_{args.seed}.csv"
-        args.validation_manifest = cand.name if cand.exists() else "image_validation_12.csv"
+        cand_img = prepared_dir / f"image_validation_{args.seed}.csv"
+        cand_pat = prepared_dir / f"patient_validation_{args.seed}.csv"
+        if cand_img.exists():
+            args.validation_manifest = cand_img.name
+        elif cand_pat.exists():
+            args.validation_manifest = cand_pat.name
+        else:
+            args.validation_manifest = "image_validation_12.csv"
+
     if args.test_manifest is None:
-        cand = prepared_dir / f"image_evaluation_{args.seed}.csv"
-        args.test_manifest = cand.name if cand.exists() else "image_evaluation_12.csv"
+        cand_img = prepared_dir / f"image_evaluation_{args.seed}.csv"
+        cand_pat = prepared_dir / f"patient_evaluation_{args.seed}.csv"
+        if cand_img.exists():
+            args.test_manifest = cand_img.name
+        elif cand_pat.exists():
+            args.test_manifest = cand_pat.name
+        else:
+            args.test_manifest = "image_evaluation_12.csv"
 
     print(f"Manifests: Train='{args.train_manifest}' | Val='{args.validation_manifest}' | Test='{args.test_manifest}'")
 
@@ -751,8 +861,8 @@ def main() -> None:
         best_auprc_path = run_dir / "checkpoint_best_macro_auprc.pt"
 
         # Check if already fully evaluated and complete
-        if (run_dir / "test_evaluation_results.json").exists() and (run_dir / "best_val_eval_results.json").exists() and not args.force:
-            print(f"[{run_id}] Already evaluated and complete on disk. Skipping (use --force to retrain).\n")
+        if (run_dir / "test_evaluation_results.json").exists() and (run_dir / "best_val_eval_results.json").exists() and not args.force and not args.re_evaluate:
+            print(f"[{run_id}] Already evaluated and complete on disk. Skipping (use --force to retrain or --re-evaluate to re-evaluate).\n")
             continue
 
         # Initialize Heterogeneous Model
@@ -871,7 +981,7 @@ def main() -> None:
                 targets=val_res["targets"],
                 probabilities=val_res["probabilities"],
                 label_names=label_columns,
-                step=0.05
+                step=args.threshold_step
             )
             epoch_calibrated_f1 = float(epoch_threshold_df["validation_f1"].mean())
             epoch_balanced_acc = float(epoch_threshold_df["validation_balanced_accuracy"].mean())
@@ -953,11 +1063,19 @@ def main() -> None:
             targets=final_val_res["targets"],
             probabilities=final_val_res["probabilities"],
             label_names=label_columns,
-            step=0.05
+            step=args.threshold_step
         )
 
-        final_calibrated_f1 = float(final_threshold_df["validation_f1"].mean())
-        final_balanced_acc = float(final_threshold_df["validation_balanced_accuracy"].mean())
+        # Calibrated validation evaluation using optimal thresholds
+        val_calib_mf, val_calib_summary, _ = evaluate_multilabel_predictions(
+            targets=final_val_res["targets"],
+            probabilities=final_val_res["probabilities"],
+            label_names=label_columns,
+            thresholds=final_best_thresholds
+        )
+
+        final_calibrated_f1 = float(val_calib_summary["macro_f1"])
+        final_balanced_acc = float(val_calib_summary["macro_balanced_accuracy"])
 
         final_results = {
             "target": target_key,
@@ -966,31 +1084,41 @@ def main() -> None:
             "modality": modality,
             "tier": tier,
             "best_epoch": best_epoch_num,
-            "final_val_loss": final_val_res["loss"],
-            "final_val_macro_auprc": final_val_res["summary"]["macro_auprc"],
-            "final_val_macro_auroc": final_val_res["summary"]["macro_auroc"],
+            "final_val_loss": float(final_val_res["loss"]),
+            "final_val_macro_auprc": float(val_calib_summary["macro_auprc"]),
+            "final_val_macro_auroc": float(val_calib_summary["macro_auroc"]),
             "final_val_macro_f1_calibrated": final_calibrated_f1,
-            "final_val_macro_f1_uncalibrated": final_val_res["summary"]["macro_f1"],
+            "final_val_macro_f1_uncalibrated": float(final_val_res["summary"]["macro_f1"]),
+            "final_val_macro_accuracy": float(val_calib_summary["macro_accuracy"]),
             "final_val_balanced_accuracy": final_balanced_acc,
             "optimal_thresholds": final_best_thresholds.tolist(),
             "config": trial_config,
+            "per_label": {},
         }
 
-        # Per-label detailed metrics
-        if "metrics_frame" in final_val_res and final_val_res["metrics_frame"] is not None:
-            per_label_dict = {}
-            for _, r in final_val_res["metrics_frame"].iterrows():
-                lbl = r["label"]
-                per_label_dict[lbl] = {
-                    "AUPRC": float(r.get("auprc", r.get("AUPRC", 0.0))),
-                    "AUROC": float(r.get("auroc", r.get("AUROC", 0.0))),
-                    "F1": float(r.get("f1", r.get("F1", 0.0))),
-                }
-            final_results["per_label_metrics"] = per_label_dict
+        # Per-label detailed metrics for validation (all 7 requested evaluation outputs)
+        for _, r in val_calib_mf.iterrows():
+            lbl = r["label"]
+            final_results["per_label"][lbl] = {
+                "AUPRC": float(r["auprc"]),
+                "AUROC": float(r["auroc"]),
+                "F1": float(r["f1"]),
+                "Accuracy": float(r["accuracy"]),
+                "Balanced_Accuracy": float(r["balanced_accuracy"]),
+                "Precision": float(r["precision"]),
+                "Recall": float(r["recall"]),
+                "Optimal_Threshold": float(r["threshold"]),
+                "TP": int(r["tp"]),
+                "TN": int(r["tn"]),
+                "FP": int(r["fp"]),
+                "FN": int(r["fn"]),
+            }
+        final_results["per_label_metrics"] = final_results["per_label"]
 
         write_json(run_dir / "best_val_eval_results.json", final_results)
 
-        print(f"\n[{run_id}] COMPLETE | Best Epoch: {best_epoch_num} | Val Macro AUPRC: {final_results['final_val_macro_auprc']:.4f} | Calibrated F1: {final_calibrated_f1:.4f}\n")
+        print(f"\n[{run_id}] VALIDATION COMPLETE | Best Epoch: {best_epoch_num} | Val Macro AUPRC: {final_results['final_val_macro_auprc']:.4f} | Calibrated F1: {final_calibrated_f1:.4f}")
+        print(format_per_label_table(val_calib_mf, f"[{run_id}] Validation Optimal Evaluation (Threshold Increment {args.threshold_step})"))
 
         # 4. Evaluation on Held-Out Test Set using Validation-Calibrated Optimal Thresholds
         test_results = None
@@ -1038,29 +1166,42 @@ def main() -> None:
             }
 
             for _, r in test_calib_mf.iterrows():
-                test_results["per_label"][r["label"]] = {
+                lbl = r["label"]
+                test_results["per_label"][lbl] = {
                     "AUPRC": float(r["auprc"]),
                     "AUROC": float(r["auroc"]),
+                    "F1": float(r["f1"]),
                     "Calibrated_F1": float(r["f1"]),
-                    "Precision": float(r["precision"]),
-                    "Recall": float(r["recall"]),
                     "Accuracy": float(r["accuracy"]),
                     "Balanced_Accuracy": float(r["balanced_accuracy"]),
+                    "Precision": float(r["precision"]),
+                    "Recall": float(r["recall"]),
                     "Optimal_Threshold": float(r["threshold"]),
                     "TP": int(r["tp"]),
                     "TN": int(r["tn"]),
                     "FP": int(r["fp"]),
                     "FN": int(r["fn"]),
                 }
+            test_results["per_label_metrics"] = test_results["per_label"]
 
             write_json(run_dir / "test_evaluation_results.json", test_results)
-            print(f"[{run_id}] HELD-OUT TEST RESULTS | Macro AUPRC: {test_results['test_macro_auprc']:.4f} | Calibrated F1: {test_results['test_macro_f1_calibrated']:.4f} | AUROC: {test_results['test_macro_auroc']:.4f}\n")
+            print(f"[{run_id}] HELD-OUT TEST COMPLETE | Macro AUPRC: {test_results['test_macro_auprc']:.4f} | Calibrated F1: {test_results['test_macro_f1_calibrated']:.4f} | AUROC: {test_results['test_macro_auroc']:.4f}")
+            print(format_per_label_table(test_calib_mf, f"[{run_id}] Held-Out Test Evaluation (Val-Calibrated Thresholds)"))
 
         if wandb_run is not None:
             wandb.run.summary["best_val_macro_auprc"] = final_results["final_val_macro_auprc"]
             wandb.run.summary["best_val_macro_auroc"] = final_results["final_val_macro_auroc"]
             wandb.run.summary["best_val_macro_f1_calibrated"] = final_calibrated_f1
             wandb.run.summary["best_epoch"] = best_epoch_num
+
+            for lbl_name, l_metrics in final_results["per_label"].items():
+                wandb.run.summary[f"val_label_auprc/{lbl_name}"] = l_metrics["AUPRC"]
+                wandb.run.summary[f"val_label_auroc/{lbl_name}"] = l_metrics["AUROC"]
+                wandb.run.summary[f"val_label_f1/{lbl_name}"] = l_metrics["F1"]
+                wandb.run.summary[f"val_label_accuracy/{lbl_name}"] = l_metrics["Accuracy"]
+                wandb.run.summary[f"val_label_balanced_acc/{lbl_name}"] = l_metrics["Balanced_Accuracy"]
+                wandb.run.summary[f"val_label_precision/{lbl_name}"] = l_metrics["Precision"]
+                wandb.run.summary[f"val_label_recall/{lbl_name}"] = l_metrics["Recall"]
 
             if test_results is not None:
                 wandb.run.summary["test/loss"] = test_results["test_loss"]
@@ -1069,13 +1210,17 @@ def main() -> None:
                 wandb.run.summary["test/macro_f1_calibrated"] = test_results["test_macro_f1_calibrated"]
                 wandb.run.summary["test/micro_f1_calibrated"] = test_results["test_micro_f1_calibrated"]
                 wandb.run.summary["test/macro_f1_uncalibrated"] = test_results["test_macro_f1_uncalibrated"]
+                wandb.run.summary["test/macro_accuracy"] = test_results["test_macro_accuracy_calibrated"]
                 wandb.run.summary["test/macro_balanced_accuracy"] = test_results["test_macro_balanced_accuracy"]
 
                 for lbl_name, l_metrics in test_results["per_label"].items():
                     wandb.run.summary[f"test_label_auprc/{lbl_name}"] = l_metrics["AUPRC"]
                     wandb.run.summary[f"test_label_auroc/{lbl_name}"] = l_metrics["AUROC"]
-                    wandb.run.summary[f"test_label_f1/{lbl_name}"] = l_metrics["Calibrated_F1"]
+                    wandb.run.summary[f"test_label_f1/{lbl_name}"] = l_metrics["F1"]
+                    wandb.run.summary[f"test_label_accuracy/{lbl_name}"] = l_metrics["Accuracy"]
                     wandb.run.summary[f"test_label_balanced_acc/{lbl_name}"] = l_metrics["Balanced_Accuracy"]
+                    wandb.run.summary[f"test_label_precision/{lbl_name}"] = l_metrics["Precision"]
+                    wandb.run.summary[f"test_label_recall/{lbl_name}"] = l_metrics["Recall"]
 
             wandb.finish()
 
