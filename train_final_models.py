@@ -230,9 +230,9 @@ def parse_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     p.add_argument("--root", type=Path, required=True, help="Dataset root directory.")
     p.add_argument("--prepared-dir", type=Path, default=None, help="Directory containing train.csv/val.csv.")
-    p.add_argument("--train-manifest", type=str, default=None, help="Train manifest (defaults to image_train_<seed>.csv or image_train_12.csv).")
-    p.add_argument("--validation-manifest", type=str, default=None, help="Validation manifest (defaults to image_validation_<seed>.csv or image_validation_12.csv).")
-    p.add_argument("--test-manifest", type=str, default=None, help="Held-out evaluation manifest (defaults to image_evaluation_<seed>.csv or image_evaluation_12.csv).")
+    p.add_argument("--train-manifest", type=str, default="image_train_12.csv", help="Train manifest (defaults to image_train_12.csv).")
+    p.add_argument("--validation-manifest", type=str, default="image_validation_12.csv", help="Validation manifest (defaults to image_validation_12.csv).")
+    p.add_argument("--test-manifest", type=str, default="image_evaluation_12.csv", help="Held-out evaluation manifest (defaults to image_evaluation_12.csv).")
     p.add_argument("--skip-test", action="store_true", help="Skip evaluation on the held-out test split.")
     p.add_argument("--output-dir", type=Path, default=None, help="Output root directory for model checkpoints.")
 
@@ -643,34 +643,13 @@ def main() -> None:
 
     # 2. Resolve Manifests, Preprocess Clinical Context, and Load Test Split
     if args.train_manifest is None:
-        cand_img = prepared_dir / f"image_train_{args.seed}.csv"
-        cand_pat = prepared_dir / f"patient_train_{args.seed}.csv"
-        if cand_img.exists():
-            args.train_manifest = cand_img.name
-        elif cand_pat.exists():
-            args.train_manifest = cand_pat.name
-        else:
-            args.train_manifest = "image_train_12.csv"
+        args.train_manifest = "image_train_12.csv"
 
     if args.validation_manifest is None:
-        cand_img = prepared_dir / f"image_validation_{args.seed}.csv"
-        cand_pat = prepared_dir / f"patient_validation_{args.seed}.csv"
-        if cand_img.exists():
-            args.validation_manifest = cand_img.name
-        elif cand_pat.exists():
-            args.validation_manifest = cand_pat.name
-        else:
-            args.validation_manifest = "image_validation_12.csv"
+        args.validation_manifest = "image_validation_12.csv"
 
     if args.test_manifest is None:
-        cand_img = prepared_dir / f"image_evaluation_{args.seed}.csv"
-        cand_pat = prepared_dir / f"patient_evaluation_{args.seed}.csv"
-        if cand_img.exists():
-            args.test_manifest = cand_img.name
-        elif cand_pat.exists():
-            args.test_manifest = cand_pat.name
-        else:
-            args.test_manifest = "image_evaluation_12.csv"
+        args.test_manifest = "image_evaluation_12.csv"
 
     print(f"Manifests: Train='{args.train_manifest}' | Val='{args.validation_manifest}' | Test='{args.test_manifest}'")
 
