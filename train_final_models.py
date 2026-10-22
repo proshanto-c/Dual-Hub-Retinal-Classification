@@ -275,6 +275,7 @@ def parse_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--threshold", type=float, default=0.5)
     p.add_argument("--num-workers", type=int, default=8)
     p.add_argument("--compile", action="store_true", help="Compile model with torch.compile (disabled by default).")
+    p.add_argument("--force", action="store_true", help="Force retrain models even if completed checkpoints exist.")
 
     # Splitting for SLURM Job Arrays
     p.add_argument("--split-total", type=int, default=1, help="Total number of parallel jobs.")
@@ -747,6 +748,12 @@ def main() -> None:
         run_dir = output_dir / target_key / modality
         run_dir.mkdir(parents=True, exist_ok=True)
         checkpoint_path = run_dir / "final_checkpoint.pt"
+        best_auprc_path = run_dir / "checkpoint_best_macro_auprc.pt"
+
+        # Check if already fully evaluated and complete
+        if (run_dir / "test_evaluation_results.json").exists() and (run_dir / "best_val_eval_results.json").exists() and not args.force:
+            print(f"[{run_id}] Already evaluated and complete on disk. Skipping (use --force to retrain).\n")
+            continue
 
         # Initialize Heterogeneous Model
         model = PatientGraphModel(
@@ -771,6 +778,8 @@ def main() -> None:
                 model = torch.compile(model)
             except Exception as e:
                 print(f"Skipping torch.compile: {e}")
+
+        raw_model = getattr(model, "_orig_mod", model)
 
         criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
         optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=learning_rate)
@@ -836,8 +845,14 @@ def main() -> None:
             "min_val_loss": float("inf")
         }
 
+        # Check if model has a saved checkpoint to skip training and jump to evaluation
+        skip_training = best_auprc_path.exists() and not args.force
+        num_train_epochs = 0 if skip_training else args.epochs
+        if skip_training:
+            print(f"--> Found existing checkpoint at {best_auprc_path}. Skipping training epochs and proceeding directly to final evaluation...")
+
         # Training Epochs
-        for epoch in range(1, args.epochs + 1):
+        for epoch in range(1, num_train_epochs + 1):
             train_res = graph_epoch(
                 model=model, loader=train_loader, criterion=criterion, device=device,
                 amp_enabled=amp_enabled, label_columns=label_columns, optimizer=optimizer,
@@ -903,20 +918,21 @@ def main() -> None:
                     mf = val_res["metrics_frame"]
                     for _, row in mf.iterrows():
                         lbl_name = row["label"]
-                        log_dict[f"val_label_auprc/{lbl_name}"] = row["AUPRC"]
-                        log_dict[f"val_label_auroc/{lbl_name}"] = row["AUROC"]
+                        log_dict[f"val_label_auprc/{lbl_name}"] = float(row.get("auprc", row.get("AUPRC", 0.0)))
+                        log_dict[f"val_label_auroc/{lbl_name}"] = float(row.get("auroc", row.get("AUROC", 0.0)))
 
                 wandb.log(log_dict, step=epoch)
 
-        # Save final checkpoint
-        raw_model = getattr(model, "_orig_mod", model)
-        torch.save({
-            "epoch": args.epochs,
-            "model_state_dict": raw_model.state_dict(),
-            "best_metrics": best_metrics,
-            "hyperparameters": trial_config,
-            "hyperparams": trial_config,
-        }, checkpoint_path)
+        # Save final checkpoint if training was performed
+        if not skip_training:
+            raw_model = getattr(model, "_orig_mod", model)
+            torch.save({
+                "epoch": args.epochs,
+                "model_state_dict": raw_model.state_dict(),
+                "best_metrics": best_metrics,
+                "hyperparameters": trial_config,
+                "hyperparams": trial_config,
+            }, checkpoint_path)
 
         # Final evaluation on the best AUPRC checkpoint
         best_auprc_path = run_dir / "checkpoint_best_macro_auprc.pt"
@@ -964,10 +980,11 @@ def main() -> None:
         if "metrics_frame" in final_val_res and final_val_res["metrics_frame"] is not None:
             per_label_dict = {}
             for _, r in final_val_res["metrics_frame"].iterrows():
-                per_label_dict[r["label"]] = {
-                    "AUPRC": float(r["AUPRC"]),
-                    "AUROC": float(r["AUROC"]),
-                    "F1": float(r["F1"]),
+                lbl = r["label"]
+                per_label_dict[lbl] = {
+                    "AUPRC": float(r.get("auprc", r.get("AUPRC", 0.0))),
+                    "AUROC": float(r.get("auroc", r.get("AUROC", 0.0))),
+                    "F1": float(r.get("f1", r.get("F1", 0.0))),
                 }
             final_results["per_label_metrics"] = per_label_dict
 
