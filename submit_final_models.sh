@@ -4,7 +4,7 @@
 #SBATCH --cpus-per-task=8           # Request 8 CPU cores for dataloading
 #SBATCH --mem=32G                   # Request 32GB total memory
 #SBATCH --gres=gpu:1                # Request 1 GPU
-#SBATCH --time=47:59:00             # Max time limit
+#SBATCH --time=23:59:00             # Max time limit (fits standard 24h partitions)
 #SBATCH --job-name=final_models
 #SBATCH --array=0-20                # 21 cluster models (6 singlelabels + 1 multilabel) x 3 modalities
 #SBATCH --output=logs/final_models_%A_%a.out
