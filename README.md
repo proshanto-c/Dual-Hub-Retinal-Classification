@@ -1,10 +1,12 @@
-# Context-Aware Multilabel Classification of Fundus Photos (CA-MLC)
+# Dual-Hub Heterogeneous Graph Attention for Multimodal Multi-Label Retinal Screening
 
-Official repository for the context-aware heterogeneous graph neural network architecture for multi-label and single-label retinal disease classification on fundus photographs and clinical tabular context.
+Official repository for the paper "Dual-Hub Heterogeneous Graph Attention for Multimodal Multi-Label Retinal Screening".
 
 ---
 
 ## Architecture Overview
+
+![Architecture Diagram](MMMLC_architecture.png)
 
 The framework models each patient examination as a heterogeneous attributed graph:
 - **Patch Nodes**: $16 \times 16$ spatial grid ($M=256$) local lesion representations with Gaussian distance attention bias (accelerated via FlashAttention SDPA).
