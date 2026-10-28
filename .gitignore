@@ -67,3 +67,10 @@ scratch/
 **/__pycache__/**
 *.py[cod]
 *$py.class
+
+# ResNet + MLP Baselines
+!models/
+!models/resnet_clinical_fusion.py
+!data_functions/BRSETFusionDataset.py
+!train_resnet_fusion.py
+!submit_resnet_fusion.sh
