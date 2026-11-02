@@ -101,10 +101,12 @@ class BRSETGraphDataset(Dataset):
         label_corr_matrix: Optional[torch.Tensor] = None,
         demo_corr_matrix: Optional[torch.Tensor] = None,
         load_images: bool = True,
+        use_hub_bridge: bool = True,
     ) -> None:
         
-        if prediction_level not in ["patient", "image", "dual_hub", "central_hub"]:
-            raise ValueError("prediction_level must be either 'patient', 'image', 'dual_hub', or 'central_hub'")
+        valid_prediction_levels = ["patient", "image", "dual_hub", "central_hub", "dual_hub_no_bridge"]
+        if prediction_level not in valid_prediction_levels:
+            raise ValueError(f"prediction_level must be one of {valid_prediction_levels}")
             
         if isinstance(data, (Path, str)):
             self.frame = pd.read_csv(data)
@@ -127,6 +129,7 @@ class BRSETGraphDataset(Dataset):
         self.connectivity = connectivity
         self.transform = transform
         self.prediction_level = prediction_level
+        self.use_hub_bridge = False if prediction_level == "dual_hub_no_bridge" else use_hub_bridge
         
         self._cache_vision_edges() 
         self._cache_correlations()
@@ -405,11 +408,17 @@ class BRSETGraphDataset(Dataset):
         data[("image", "to", "patch")].edge_index = torch.stack([torch.cat(i2p_src), torch.cat(i2p_dst)], dim=0)
         data[("image", "to", "patch")].edge_attr = torch.ones((data[("image", "to", "patch")].edge_index.size(1), 1), dtype=torch.float32)
         
-        data[("image", "to", "patient")].edge_index = torch.stack([torch.cat(i2pat_src), torch.cat(i2pat_dst)], dim=0)
-        data[("image", "to", "patient")].edge_attr = torch.ones((data[("image", "to", "patient")].edge_index.size(1), 1), dtype=torch.float32)
-        
-        data[("patient", "to", "image")].edge_index = torch.stack([torch.cat(pat2i_src), torch.cat(pat2i_dst)], dim=0)
-        data[("patient", "to", "image")].edge_attr = torch.ones((data[("patient", "to", "image")].edge_index.size(1), 1), dtype=torch.float32)
+        if self.use_hub_bridge:
+            data[("image", "to", "patient")].edge_index = torch.stack([torch.cat(i2pat_src), torch.cat(i2pat_dst)], dim=0)
+            data[("image", "to", "patient")].edge_attr = torch.ones((data[("image", "to", "patient")].edge_index.size(1), 1), dtype=torch.float32)
+            
+            data[("patient", "to", "image")].edge_index = torch.stack([torch.cat(pat2i_src), torch.cat(pat2i_dst)], dim=0)
+            data[("patient", "to", "image")].edge_attr = torch.ones((data[("patient", "to", "image")].edge_index.size(1), 1), dtype=torch.float32)
+        else:
+            data[("image", "to", "patient")].edge_index = torch.empty((2, 0), dtype=torch.long)
+            data[("image", "to", "patient")].edge_attr = torch.empty((0, 1), dtype=torch.float32)
+            data[("patient", "to", "image")].edge_index = torch.empty((2, 0), dtype=torch.long)
+            data[("patient", "to", "image")].edge_attr = torch.empty((0, 1), dtype=torch.float32)
             
     def _attach_structural_edges(self, data: HeteroData, num_labels: int, num_images: int) -> None:
         num_demo = len(self.demo_specs)
@@ -451,14 +460,14 @@ class BRSETGraphDataset(Dataset):
             data[("label", "correlates", "label")].edge_index = torch.empty((2, 0), dtype=torch.long)
             data[("label", "correlates", "label")].edge_attr = torch.empty((0, 1), dtype=torch.float32)
         
-        if self.prediction_level in ["patient", "dual_hub"]:
+        if self.prediction_level in ["patient", "dual_hub", "dual_hub_no_bridge"]:
             data[("patient", "to", "label")].edge_index = torch.tensor([[0] * num_labels, list(range(num_labels))], dtype=torch.long)
             data[("patient", "to", "label")].edge_attr = torch.ones((num_labels, 1), dtype=torch.float32)
             
             data[("label", "to", "patient")].edge_index = torch.tensor([list(range(num_labels)), [0] * num_labels], dtype=torch.long)
             data[("label", "to", "patient")].edge_attr = torch.ones((num_labels, 1), dtype=torch.float32)
             
-        if self.prediction_level in ["image", "dual_hub"]:
+        if self.prediction_level in ["image", "dual_hub", "dual_hub_no_bridge"]:
             img_src, lbl_dst = [], []
             for i in range(num_images):
                 img_src.extend([i] * num_labels)

@@ -115,14 +115,17 @@ class PatientGraphModel(nn.Module):
         patch_connectivity: Any = "fc",
         image_size: int = 512,
         patch_size: Optional[int] = None,
+        use_hub_bridge: bool = True,
     ) -> None:
         super().__init__()
         
         self.backbone = backbone
-        if prediction_level not in ["patient", "image", "dual_hub", "central_hub"]:
-            raise ValueError("prediction_level must be either 'patient', 'image', 'dual_hub', or 'central_hub'")
+        valid_prediction_levels = ["patient", "image", "dual_hub", "central_hub", "dual_hub_no_bridge"]
+        if prediction_level not in valid_prediction_levels:
+            raise ValueError(f"prediction_level must be one of {valid_prediction_levels}")
             
         self.prediction_level = prediction_level
+        self.use_hub_bridge = False if prediction_level == "dual_hub_no_bridge" else use_hub_bridge
         self.use_context = use_context
         self.use_image_features = use_image_features
         self.num_labels = num_labels
@@ -253,20 +256,23 @@ class PatientGraphModel(nn.Module):
             
             # Context Pathways (removed for image-only baselines)
             if self.use_context:
+                if self.use_hub_bridge:
+                    conv_dict.update({
+                        ("image", "to", "patient"): GATConv((-1, -1), hidden_dim, heads=heads, concat=False, dropout=dropout, add_self_loops=False, edge_dim=1),
+                        ("patient", "to", "image"): GATConv((-1, -1), hidden_dim, heads=heads, concat=False, dropout=dropout, add_self_loops=False, edge_dim=1),
+                    })
                 conv_dict.update({
-                    ("image", "to", "patient"): GATConv((-1, -1), hidden_dim, heads=heads, concat=False, dropout=dropout, add_self_loops=False, edge_dim=1),
-                    ("patient", "to", "image"): GATConv((-1, -1), hidden_dim, heads=heads, concat=False, dropout=dropout, add_self_loops=False, edge_dim=1),
                     ("demographic", "to", "patient"): GATConv((-1, -1), hidden_dim, heads=heads, concat=False, dropout=dropout, add_self_loops=False, edge_dim=1),
                     ("patient", "to", "demographic"): GATConv((-1, -1), hidden_dim, heads=heads, concat=False, dropout=dropout, add_self_loops=False, edge_dim=1),
                     ("demographic", "correlates", "demographic"): GATConv((-1, -1), hidden_dim, heads=heads, concat=False, dropout=dropout, add_self_loops=True, edge_dim=1),
                 })
             
             # --- DYNAMIC LABEL PATHWAYS ---
-            if self.prediction_level in ["patient", "dual_hub"] and self.use_context:
+            if self.prediction_level in ["patient", "dual_hub", "dual_hub_no_bridge"] and self.use_context:
                 conv_dict[("patient", "to", "label")] = GATConv((-1, -1), hidden_dim, heads=heads, concat=False, dropout=dropout, add_self_loops=False, edge_dim=1)
                 conv_dict[("label", "to", "patient")] = GATConv((-1, -1), hidden_dim, heads=heads, concat=False, dropout=dropout, add_self_loops=False, edge_dim=1)
             
-            if self.prediction_level in ["image", "dual_hub"]:
+            if self.prediction_level in ["image", "dual_hub", "dual_hub_no_bridge"]:
                 conv_dict[("image", "to", "label")] = GATConv((-1, -1), hidden_dim, heads=heads, concat=False, dropout=dropout, add_self_loops=False, edge_dim=1)
                 conv_dict[("label", "to", "image")] = GATConv((-1, -1), hidden_dim, heads=heads, concat=False, dropout=dropout, add_self_loops=False, edge_dim=1)
                 
@@ -423,7 +429,7 @@ class PatientGraphModel(nn.Module):
             x_dict = next_x
 
         # --- DYNAMIC OUTPUT ROUTING ---
-        if self.prediction_level in ["patient", "dual_hub"]:
+        if self.prediction_level in ["patient", "dual_hub", "dual_hub_no_bridge"]:
             # Read from the label nodes (which aggregate both hubs simultaneously in dual_hub)
             logits = self.label_head(x_dict["label"]).squeeze(-1)
             num_targets = data["patient"].num_nodes if "patient" in data else data["image"].num_nodes
