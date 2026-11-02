@@ -45,6 +45,9 @@
 #
 #   # 6. Run all cluster models for multimodal img_ctx only (7 models across Array 0-6):
 #   sbatch --array=0-6 submit_final_models.sh 42 --modalities img_ctx
+#
+#   # 7. Run ONLY the multimodal multilabel model (img_ctx) with unbridged dual hub:
+#   sbatch --array=0 submit_final_models.sh 42 --labels multilabel --modalities img_ctx --prediction-level dual_hub_no_bridge
 # ==============================================================================
 
 # 1. Activate Environment

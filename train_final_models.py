@@ -269,6 +269,13 @@ def parse_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--image-size", type=int, default=512)
     p.add_argument("--patch-size", type=int, default=None, help="Defaults to 16 for retfound, 32 for resnet")
     p.add_argument("--connectivity", default="fc", help="Patch graph connectivity: 'fc' (recommended), 4, or 8.")
+    p.add_argument(
+        "--prediction-level",
+        type=str,
+        default="dual_hub",
+        choices=["dual_hub", "dual_hub_no_bridge", "patient", "image", "central_hub"],
+        help="Prediction level architecture (default: dual_hub).",
+    )
     p.add_argument("--epochs", type=int, default=150, help="Number of training epochs (default: 150).")
     p.add_argument("--batch-size", type=int, default=32, help="Effective batch size (default: 32).")
     p.add_argument("--seed", type=int, default=42)
@@ -744,8 +751,8 @@ def main() -> None:
         print(f"=== Micro-batch: {micro_batch_size}, Grad Accumulation: {accum_steps} ===")
         print("===================================================================\n")
 
-        # Invalidate dataset cache if target labels or load_images changed
-        cache_key = (tuple(label_columns), load_images)
+        # Invalidate dataset cache if target labels, load_images, or prediction_level changed
+        cache_key = (tuple(label_columns), load_images, args.prediction_level)
         if cache_key != current_cache_key:
             del train_dataset, val_dataset, test_dataset
             gc.collect()
@@ -760,7 +767,7 @@ def main() -> None:
                 "image_size": args.image_size,
                 "patch_size": args.patch_size,
                 "connectivity": args.connectivity,
-                "prediction_level": "dual_hub",
+                "prediction_level": args.prediction_level,
                 "train_frame": train_frame,
                 "load_images": load_images,
             }
@@ -852,7 +859,7 @@ def main() -> None:
             num_layers=n_layers,
             dropout=dropout,
             heads=heads,
-            prediction_level="dual_hub",
+            prediction_level=args.prediction_level,
             initial_biases=adaptive_biases,
             use_context=use_context,
             use_image_features=use_image_features,
@@ -906,6 +913,7 @@ def main() -> None:
             "image_size": args.image_size,
             "patch_size": args.patch_size,
             "connectivity": args.connectivity,
+            "prediction_level": args.prediction_level,
             "demo_specs": [ds.to_dict() if hasattr(ds, "to_dict") else ds.__dict__ for ds in demo_specs],
             "demo_columns": demo_columns,
         }
